@@ -1,0 +1,20 @@
+{
+  "servers": [
+    {
+      "id": "filesystem",
+      "name": "Filesystem MCP",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "enabled": true,
+      "status": "connected"
+    },
+    {
+      "id": "memory",
+      "name": "Memory MCP",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "enabled": false,
+      "status": "disconnected"
+    }
+  ]
+}

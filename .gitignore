@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.pnpm-store/
+*.log
+.env
+.env.*
