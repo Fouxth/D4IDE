@@ -9,15 +9,21 @@ import {
   FolderOpen,
   Info,
   Loader2,
+  Check,
   Minimize2,
+  Package,
   RefreshCw,
   RotateCcw,
+  ShieldCheck,
   Stethoscope,
   Trash2
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from '../../stores/toastStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { currentVersion, useUpdateStore } from '../../stores/updateStore';
+import { useCatalogStore } from '../../stores/catalogStore';
+import { useAgentStore } from '../../stores/agentStore';
 import { LogChannel, LogLevel, LogRecord, UpdateStatus } from '../../../shared/types';
 import { formatBytes, formatRelativeTime } from '../../lib/format';
 
@@ -259,31 +265,36 @@ const AppStorageSection: React.FC = () => {
 };
 
 /**
- * Updates (spec §83). The state machine lives in the main process; this view
- * only reflects it and offers the two actions the user is allowed to take.
+ * Updates (spec §83).
+ *
+ * Two steps, shown as two steps, because they are not the same decision:
+ * fetching a build changes nothing on this machine, while installing closes the
+ * app. The state machine and the check schedule live in the main process; this
+ * view reflects them, and every action on it is a button the user pressed.
  */
 export const UpdateTab: React.FC = () => {
   const { t } = useTranslation();
-  const [status, setStatus] = useState<UpdateStatus>({ state: 'idle' });
-  const [busy, setBusy] = useState(false);
+  const { settings, updateSettings } = useSettingsStore();
+  const { status, busy, check, download, install } = useUpdateStore();
+  const {
+    status: catalog,
+    busy: catalogBusy,
+    check: catalogCheck,
+    apply: catalogApply,
+    discard: catalogDiscard,
+    undo: catalogUndo
+  } = useCatalogStore();
+  const { status: agentStatus } = useAgentStore();
 
-  useEffect(() => {
-    if (!window.electronAPI) return;
-    void window.electronAPI.getUpdateStatus().then(setStatus);
-    const unsubscribe = window.electronAPI.onUpdateStatus(setStatus);
-    return () => {
-      unsubscribe();
-    };
-  }, []);
-
-  const run = async (action: () => Promise<UpdateStatus>) => {
-    setBusy(true);
-    try {
-      setStatus(await action());
-    } finally {
-      setBusy(false);
-    }
-  };
+  const agentBusy = agentStatus === 'running' || agentStatus === 'planning' || agentStatus === 'waiting_approval';
+  const checking = status.state === 'checking' || status.state === 'downloading';
+  const autoCheck = settings?.updateCheckEnabled !== false;
+  const autoCatalog = settings?.catalogCheckEnabled !== false;
+  const skippedVersion = settings?.skippedUpdateVersion || '';
+  const catalogDiff = catalog.diff;
+  const catalogChanged = catalogDiff
+    ? catalogDiff.providers.filter((provider) => provider.added.length > 0 || provider.changed.length > 0)
+    : [];
 
   const label: Record<UpdateStatus['state'], string> = {
     idle: t('update.upToDate'),
@@ -302,12 +313,22 @@ export const UpdateTab: React.FC = () => {
         <p className="text-[11px] text-d4-dimmed mt-0.5">{t('update.subtitle')}</p>
       </div>
 
+      <div className="flex items-start gap-2 rounded border border-d4-border bg-d4-surface p-2 text-[11px] text-d4-muted">
+        <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0 text-d4-accent" />
+        <p>{t('update.detectionOnly')}</p>
+      </div>
+
       <div className="bg-d4-surface border border-d4-border rounded p-3 space-y-2 text-[11px]">
         <div className="flex items-center gap-2">
-          <span className="text-d4-text font-semibold">D4IDE 1.0.0</span>
-          {status.state === 'checking' || status.state === 'downloading' ? (
-            <RefreshCw className="w-3 h-3 animate-spin text-d4-accent" />
+          <span className="text-d4-text font-semibold">
+            D4IDE {currentVersion}
+          </span>
+          {status.version && (status.state === 'available' || status.state === 'ready') ? (
+            <span className={status.state === 'ready' ? 'text-d4-success font-semibold' : 'text-d4-accent font-semibold'}>
+              → {status.version}
+            </span>
           ) : null}
+          {checking ? <RefreshCw className="w-3 h-3 animate-spin text-d4-accent" /> : null}
         </div>
         <div className={status.state === 'error' ? 'text-d4-error' : 'text-d4-muted'}>
           {label[status.state]}
@@ -318,41 +339,270 @@ export const UpdateTab: React.FC = () => {
             {t('update.lastChecked', { time: formatRelativeTime(status.checkedAt) })}
           </div>
         ) : null}
-        {status.notes ? <div className="text-d4-muted border-l-2 border-d4-border pl-2">{status.notes}</div> : null}
+        {status.notes ? (
+          <div className="space-y-1">
+            <div className="text-d4-dimmed">{t('update.notesTitle')}</div>
+            <div className="text-d4-muted border-l-2 border-d4-border pl-2 whitespace-pre-wrap max-h-40 overflow-auto">
+              {status.notes}
+            </div>
+          </div>
+        ) : null}
       </div>
 
-      <div className="flex items-center gap-2">
-        <button
-          disabled={busy}
-          onClick={() => void run(() => window.electronAPI!.checkForUpdates())}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-surface border border-d4-border text-[11px] text-d4-text hover:bg-d4-subtle disabled:opacity-40"
-        >
-          <RefreshCw className={`w-3 h-3 ${busy ? 'animate-spin' : ''}`} />
-          {t('update.check')}
-        </button>
+      {/* Step one: fetch it. Step two: let it close the app. */}
+      <div className="space-y-2">
+        <div className="rounded border border-d4-border bg-d4-surface p-3 text-[11px]">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-d4-text font-medium">
+              <Download className="w-3.5 h-3.5 text-d4-accent" />
+              {t('update.step1')}
+            </div>
+            {status.state === 'available' ? (
+              <button
+                disabled={busy}
+                onClick={() => void download()}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-accent text-black text-[11px] font-medium disabled:opacity-40"
+              >
+                <Download className="w-3 h-3" />
+                {t('update.download')}
+              </button>
+            ) : status.state === 'downloading' ? (
+              <span className="font-mono text-d4-accent">{status.percent ?? 0}%</span>
+            ) : status.state === 'ready' ? (
+              <span className="flex items-center gap-1 text-d4-success">
+                <Check className="w-3 h-3" />
+                {t('update.readyToInstall')}
+              </span>
+            ) : (
+              <span className="text-d4-dimmed">—</span>
+            )}
+          </div>
+          <p className="mt-1 text-d4-dimmed">{t('update.step1HintLong')}</p>
+          {status.state === 'downloading' ? (
+            <div className="mt-2 h-1 rounded-full bg-d4-border overflow-hidden">
+              <div
+                className="h-full bg-d4-accent transition-[width] duration-300"
+                style={{ width: `${Math.min(100, Math.max(0, status.percent ?? 0))}%` }}
+              />
+            </div>
+          ) : null}
+        </div>
 
-        {status.state === 'available' && (
-          <button
-            disabled={busy}
-            onClick={() => void run(() => window.electronAPI!.downloadUpdate())}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-accent text-black text-[11px] font-medium disabled:opacity-40"
-          >
-            <Download className="w-3 h-3" />
-            {t('update.download')}
-          </button>
-        )}
-
-        {status.state === 'ready' && (
-          <button
-            disabled={busy}
-            onClick={() => void run(() => window.electronAPI!.installUpdate())}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-accent text-black text-[11px] font-medium disabled:opacity-40"
-          >
-            <RotateCcw className="w-3 h-3" />
-            {t('update.install')}
-          </button>
-        )}
+        <div className="rounded border border-d4-border bg-d4-surface p-3 text-[11px]">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-d4-text font-medium">
+              <RotateCcw className="w-3.5 h-3.5 text-d4-accent" />
+              {t('update.step2')}
+            </div>
+            <button
+              disabled={busy || agentBusy || status.state !== 'ready'}
+              title={agentBusy ? t('update.agentBusy') : t('update.step2HintLong')}
+              onClick={() => void install()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-accent text-black text-[11px] font-medium disabled:opacity-40"
+            >
+              <RotateCcw className="w-3 h-3" />
+              {t('update.install')}
+            </button>
+          </div>
+          <p className="mt-1 text-d4-dimmed">{t('update.step2HintLong')}</p>
+          {status.state === 'ready' ? (
+            <p className={`mt-1 ${agentBusy ? 'text-d4-warning' : 'text-d4-muted'}`}>
+              {agentBusy ? t('update.agentBusy') : t('update.downloadedNote', { version: status.version || '' })}
+            </p>
+          ) : null}
+        </div>
       </div>
+
+      {/* Detection settings. There is deliberately no "download automatically":
+          the rule this whole screen states is that nothing happens without a
+          click, and a switch to the contrary would make that a lie. */}
+      <div className="space-y-2 rounded border border-d4-border bg-d4-surface p-3 text-[11px]">
+        <label className="flex items-center gap-2 text-d4-muted">
+          <input
+            type="checkbox"
+            checked={autoCheck}
+            onChange={(e) => updateSettings({ updateCheckEnabled: e.target.checked })}
+            className="accent-d4-accent"
+          />
+          {t('update.autoCheck')}
+        </label>
+        <p className="text-d4-dimmed">{t('update.autoCheckHint')}</p>
+
+        {autoCheck ? (
+          <div className="space-y-2 pl-6">
+            <label className="flex items-center gap-2 text-d4-muted">
+              <input
+                type="checkbox"
+                checked={settings?.checkUpdatesOnLaunch !== false}
+                onChange={(e) => updateSettings({ checkUpdatesOnLaunch: e.target.checked })}
+                className="accent-d4-accent"
+              />
+              {t('update.checkOnLaunch')}
+            </label>
+            <p className="text-d4-dimmed">{t('update.checkOnLaunchHint')}</p>
+            <label className="flex items-center gap-2 text-d4-muted">
+              <span>{t('update.intervalLabel')}</span>
+              <select
+                value={settings?.updateCheckIntervalHours ?? 6}
+                onChange={(e) => updateSettings({ updateCheckIntervalHours: Number(e.target.value) })}
+                className="bg-d4-bg border border-d4-border rounded-sm px-1.5 py-0.5 text-[11px] text-d4-text"
+              >
+                {[1, 6, 12, 24].map((hours) => (
+                  <option key={hours} value={hours}>
+                    {t('update.hours', { count: hours })}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ) : null}
+
+        <div>
+          <button
+            disabled={busy}
+            onClick={() => void check()}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-surface border border-d4-border text-[11px] text-d4-text hover:bg-d4-subtle disabled:opacity-40"
+          >
+            <RefreshCw className={`w-3 h-3 ${busy ? 'animate-spin' : ''}`} />
+            {t('update.check')}
+          </button>
+        </div>
+      </div>
+
+      {/* The same rule as the updater, applied to what the providers serve:
+          ask, stage the difference, wait for a click. */}
+      <div className="space-y-2 rounded border border-d4-border bg-d4-surface p-3 text-[11px]">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-d4-text font-medium">
+            <Package className="w-3.5 h-3.5 text-d4-accent" />
+            {t('catalog.title')}
+          </div>
+          <div className="flex items-center gap-1.5">
+            {catalog.state === 'changes' ? (
+              <>
+                <button
+                  disabled={catalogBusy}
+                  onClick={() => void catalogApply()}
+                  className="px-3 py-1.5 rounded-sm bg-d4-accent text-black text-[11px] font-medium disabled:opacity-40"
+                >
+                  {t('catalog.apply')}
+                </button>
+                <button
+                  disabled={catalogBusy}
+                  onClick={() => void catalogDiscard()}
+                  className="px-2 py-1.5 rounded-sm border border-d4-border text-d4-muted hover:text-d4-text disabled:opacity-40"
+                >
+                  {t('catalog.discard')}
+                </button>
+              </>
+            ) : (
+              <button
+                disabled={catalogBusy}
+                onClick={() => void catalogCheck()}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-surface border border-d4-border text-[11px] text-d4-text hover:bg-d4-subtle disabled:opacity-40"
+              >
+                <RefreshCw className={`w-3 h-3 ${catalogBusy || catalog.state === 'checking' ? 'animate-spin' : ''}`} />
+                {t('catalog.checkNow')}
+              </button>
+            )}
+            {catalog.undoAvailable ? (
+              <button
+                disabled={catalogBusy}
+                onClick={() => void catalogUndo()}
+                title={t('catalog.undoHint')}
+                className="px-2 py-1.5 rounded-sm border border-d4-border text-d4-muted hover:text-d4-text disabled:opacity-40"
+              >
+                {t('catalog.undo')}
+              </button>
+            ) : null}
+          </div>
+        </div>
+        <p className="text-d4-dimmed">{t('catalog.subtitle')}</p>
+
+        {catalogDiff ? (
+          <div className="space-y-1 border-t border-d4-border pt-2">
+            <div className="flex items-center gap-3 text-d4-muted">
+              <span>{t('catalog.added', { n: catalogDiff.totals.added })}</span>
+              <span>{t('catalog.changed', { n: catalogDiff.totals.changed })}</span>
+              {catalogDiff.totals.kept > 0 ? (
+                <span className="text-d4-dimmed">{t('catalog.kept', { n: catalogDiff.totals.kept })}</span>
+              ) : null}
+            </div>
+
+            {catalogChanged.length > 0 ? (
+              <ul className="space-y-0.5">
+                {catalogChanged.map((provider) => (
+                  <li key={provider.providerId} className="text-d4-dimmed">
+                    <span className="text-d4-muted">{provider.providerName}</span>
+                    {provider.added.length > 0 ? ` · ${t('catalog.added', { n: provider.added.length })}` : ''}
+                    {provider.changed.length > 0 ? ` · ${t('catalog.changed', { n: provider.changed.length })}` : ''}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-d4-dimmed">{t('catalog.nothingNew')}</div>
+            )}
+
+            {catalogDiff.failures.length > 0 ? (
+              <div className="text-d4-warning">{t('catalog.failed', { n: catalogDiff.failures.length })}</div>
+            ) : null}
+            <div className="text-d4-dimmed">
+              {t('catalog.lastChecked', { time: formatRelativeTime(catalogDiff.checkedAt) })}
+            </div>
+          </div>
+        ) : catalog.checkedAt ? (
+          <div className="text-d4-dimmed">
+            {t('catalog.lastChecked', { time: formatRelativeTime(catalog.checkedAt) })}
+          </div>
+        ) : null}
+
+        {catalog.state === 'error' && catalog.error ? (
+          <div className="text-d4-error">{catalog.error}</div>
+        ) : null}
+
+        <label className="flex items-center gap-2 text-d4-muted">
+          <input
+            type="checkbox"
+            checked={autoCatalog}
+            onChange={(e) => updateSettings({ catalogCheckEnabled: e.target.checked })}
+            className="accent-d4-accent"
+          />
+          {t('catalog.autoCheck')}
+        </label>
+        {autoCatalog ? (
+          <label className="flex items-center gap-2 pl-6 text-d4-muted">
+            <span>{t('update.intervalLabel')}</span>
+            <select
+              value={settings?.catalogCheckIntervalHours ?? 24}
+              onChange={(e) => updateSettings({ catalogCheckIntervalHours: Number(e.target.value) })}
+              className="bg-d4-bg border border-d4-border rounded-sm px-1.5 py-0.5 text-[11px] text-d4-text"
+            >
+              {[6, 12, 24, 72].map((hours) => (
+                <option key={hours} value={hours}>
+                  {t('update.hours', { count: hours })}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+      </div>
+
+      {skippedVersion ? (
+        <div className="flex items-center justify-between gap-2 rounded border border-d4-border bg-d4-surface p-2 text-[11px]">
+          <span className="text-d4-dimmed">
+            {t('update.skipManage')}: <span className="text-d4-muted font-mono">{skippedVersion}</span>
+          </span>
+          <button
+            onClick={() => {
+              // Saying "tell me about it again" is a request to look, so look.
+              void updateSettings({ skippedUpdateVersion: '' }).then(() => check());
+            }}
+            className="px-2 py-1 rounded-sm border border-d4-border text-d4-muted hover:text-d4-text"
+          >
+            {t('update.unskip')}
+          </button>
+        </div>
+      ) : null}
 
       {status.state === 'unsupported' && (
         <div className="flex items-start gap-2 text-[11px] text-d4-dimmed">

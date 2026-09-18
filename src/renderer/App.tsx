@@ -3,6 +3,7 @@ import { TitleBar } from './components/TitleBar';
 import { LeftNav } from './components/LeftNav';
 import { StatusBar } from './components/StatusBar';
 import { ToastHost } from './components/ToastHost';
+import { UpdateBanner } from './components/UpdateBanner';
 import { AgentTimeline } from './features/agent/AgentTimeline';
 import { ConversationMap } from './features/agent/ConversationMap';
 import { Composer } from './features/agent/Composer';
@@ -23,6 +24,8 @@ import { useUsageStore } from './stores/usageStore';
 import { useQueueStore } from './stores/queueStore';
 import { useSessionsStore } from './stores/sessionsStore';
 import { useUiStore } from './stores/uiStore';
+import { useUpdateStore } from './stores/updateStore';
+import { useCatalogStore } from './stores/catalogStore';
 import { toast } from './stores/toastStore';
 import { notify } from './lib/notify';
 import { useTranslation } from 'react-i18next';
@@ -114,6 +117,8 @@ const App: React.FC = () => {
   const { load: loadUsage, setSummary, setTokenStats, lastWarning, clearWarning } = useUsageStore();
   const { runNext, settleRunning, items: queueItems } = useQueueStore();
   const { refresh: refreshSessions, setActive: setActiveSession } = useSessionsStore();
+  const startUpdateWatch = useUpdateStore((s) => s.start);
+  const startCatalogWatch = useCatalogStore((s) => s.start);
 
   const openSettings = useCallback((tab: SettingsTabId = 'providers') => {
     setSettingsTab(tab);
@@ -151,6 +156,10 @@ const App: React.FC = () => {
     loadUsage();
     // Offer back anything a crash left unsaved (spec §84).
     void checkForRecoveredBuffers();
+    // Listening only: the schedules that decide *when* to look live in the main
+    // process, so reloading this window cannot restart them or lose them.
+    startUpdateWatch();
+    startCatalogWatch();
 
     if (!window.electronAPI) return;
 
@@ -185,7 +194,18 @@ const App: React.FC = () => {
         if (typeof unsubscribe === 'function') unsubscribe();
       }
     };
-  }, [loadSettings, loadUsage, addTimelineItem, updateStatus, setTodos, addChange, setSummary, setTokenStats]);
+  }, [
+    loadSettings,
+    loadUsage,
+    startUpdateWatch,
+    startCatalogWatch,
+    addTimelineItem,
+    updateStatus,
+    setTodos,
+    addChange,
+    setSummary,
+    setTokenStats
+  ]);
 
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatusSummary | null>(null);
@@ -425,6 +445,7 @@ const App: React.FC = () => {
           {workspaceMode === 'agent' ? (
             <div className="flex-1 flex min-h-0 overflow-hidden">
               <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+                <UpdateBanner />
                 <SessionRecoveryBanner />
                 <AgentTimeline />
                 <Composer

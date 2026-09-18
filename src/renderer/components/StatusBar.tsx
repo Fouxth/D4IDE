@@ -1,11 +1,12 @@
 import React from 'react';
-import { GitBranch, AlertTriangle, Terminal, PanelLeft, Bot, Code2, Loader2, Zap, Leaf } from 'lucide-react';
+import { GitBranch, AlertTriangle, Terminal, PanelLeft, Bot, Code2, Loader2, Zap, Leaf, Sparkles, Download, RotateCcw } from 'lucide-react';
 import { formatTokens } from '../lib/format';
 import { useTranslation } from 'react-i18next';
 import { useAgentStore } from '../stores/agentStore';
 import { useProject } from '../stores/projectStore';
 import { useUsageStore } from '../stores/usageStore';
 import { useSettingsStore } from '../stores/settingsStore';
+import { useUpdateStore } from '../stores/updateStore';
 import { GitStatusSummary, WorkspaceMode } from '../../shared/types';
 
 interface StatusBarProps {
@@ -41,6 +42,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   const { projectPath } = useProject((s) => ({ projectPath: s.projectPath }));
   const { summary, tokenStats } = useUsageStore();
   const { settings } = useSettingsStore();
+  const { status: updateStatus } = useUpdateStore();
 
   const changed = gitStatus ? gitStatus.staged.length + gitStatus.unstaged.length + gitStatus.untracked.length : 0;
   const busy = status === 'running' || status === 'planning' || status === 'waiting_approval';
@@ -158,6 +160,38 @@ export const StatusBar: React.FC<StatusBarProps> = ({
             <span>{t('nav.codeView')}</span>
           </button>
         </div>
+
+        {/* Only a found build is announced here. A failed check is not a badge:
+            a permanently red corner in a status bar stops being read, and the
+            detail belongs in Settings → Updates where it can be acted on. */}
+        {updateStatus.state === 'available' && (
+          <button
+            onClick={() => onOpenSettings('update')}
+            className={`${cell} text-d4-accent`}
+            title={t('update.statusBarHint')}
+          >
+            <Sparkles className="w-3 h-3" />
+            <span>{t('update.badgeAvailable', { version: updateStatus.version || '' })}</span>
+          </button>
+        )}
+
+        {updateStatus.state === 'downloading' && (
+          <button onClick={() => onOpenSettings('update')} className={`${cell} text-d4-accent`}>
+            <Download className="w-3 h-3" />
+            <span>{t('update.badgeDownloading', { percent: updateStatus.percent ?? 0 })}</span>
+          </button>
+        )}
+
+        {updateStatus.state === 'ready' && (
+          <button
+            onClick={() => onOpenSettings('update')}
+            className={`${cell} text-d4-success`}
+            title={t('update.statusBarReadyHint')}
+          >
+            <RotateCcw className="w-3 h-3" />
+            <span>{t('update.badgeReady')}</span>
+          </button>
+        )}
 
         <button onClick={() => onOpenSettings('language')} className={cell}>
           <span>{settings?.language === 'th' ? 'ไทย' : 'EN'}</span>
