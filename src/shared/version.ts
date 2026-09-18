@@ -10,3 +10,12 @@
 export const APP_VERSION = '1.0.0';
 
 export const USER_AGENT = `D4IDE/${APP_VERSION}`;
+
+/**
+ * Where the update feed lives, in the one place the UI reads it.
+ *
+ * It is the same repository the installer was published from, so "read what
+ * changed" and "download it by hand" are the same page as the one the updater
+ * asks for a version list.
+ */
+export const RELEASES_URL = 'https://github.com/Fouxth/D4IDE/releases';

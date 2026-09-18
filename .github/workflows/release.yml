@@ -1,0 +1,58 @@
+name: Release
+
+# The tag is the release switch: pushing one is a deliberate act, and nothing
+# here runs on an ordinary commit.
+on:
+  push:
+    tags: ['v*']
+
+# Uploading release assets needs write access to the repository; the default
+# token is read-only for other workflows.
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Secret gate
+        run: pnpm check:secrets
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test
+
+      # A release whose tag and version disagree would install one build and
+      # advertise another, and the updater compares exactly those two numbers.
+      - name: The tag must match package.json
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json ($version)"
+            exit 1
+          fi
+          echo "releasing $version"
+
+      - name: Build, package and publish
+        run: pnpm dist:publish
+        env:
+          # Scoped to this repository and used only for the upload. Nothing is
+          # embedded in the application: the installed build reads its update
+          # feed from the public releases of a public repository, which is why
+          # no token has to live on a user's machine.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

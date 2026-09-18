@@ -1,0 +1,39 @@
+name: CI
+
+# Runs on the work, not on the tag: a release should never be the first time
+# anyone finds out the build is broken.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    # Windows because this is a Windows application end to end: the native
+    # modules are rebuilt against Electron's ABI and the installer is NSIS.
+    # Checking it anywhere else would test a build nobody ships.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # Reads `packageManager` from package.json, so the version here and on
+        # every developer machine cannot drift.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # First, so a leaked key fails before anything else is reported.
+      - name: Secret gate
+        run: pnpm check:secrets
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test
