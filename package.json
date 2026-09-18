@@ -3,13 +3,25 @@
   "version": "1.0.0",
   "description": "D4IDE — Agent-first AI Coding IDE for Windows",
   "author": "D4IDE Team",
+  "packageManager": "pnpm@12.4.2+sha512.08adc6613180275c7c9edada39dcf08c9c61ad4e7eaf330a4f3461f102b0f907423454d117f98e72d47fef0616070644d7bffc973a6a57f5090a6d7c368b07c9",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "main": "dist-electron/main/index.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "dist": "npm run build && electron-builder --win --x64"
+    "postinstall": "node scripts/rebuild-native.cjs --tolerant",
+    "rebuild:native": "node scripts/rebuild-native.cjs",
+    "native:check": "electron scripts/check-native.cjs",
+    "native:check:packaged": "electron scripts/check-packaged.cjs",
+    "dist": "npm run icon:build && npm run rebuild:native && npm run build && electron-builder --win --x64",
+    "icon:build": "node scripts/make-icon.cjs",
+    "providers:sync": "node scripts/sync-providers.cjs",
+    "providers:check": "node scripts/check-providers.cjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -17,9 +29,11 @@
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "clsx": "^2.1.1",
+    "electron-updater": "^6.8.9",
     "i18next": "^24.2.3",
     "lucide-react": "^1.16.0",
     "monaco-editor": "^0.52.2",
+    "playwright-core": "^1.63.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-i18next": "^15.4.1",
@@ -43,9 +57,15 @@
     "vite-plugin-electron-renderer": "^0.14.6",
     "vitest": "^3.0.8"
   },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.10.0",
+    "chokidar": "^4.0.3",
+    "node-pty": "^1.0.0"
+  },
   "build": {
     "appId": "com.d4ide.app",
     "productName": "D4IDE",
+    "npmRebuild": false,
     "directories": {
       "output": "release"
     },
@@ -54,7 +74,13 @@
       "dist-electron/**/*",
       "package.json"
     ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**",
+      "**/node_modules/node-pty/**"
+    ],
+    "icon": "build/icon.png",
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
