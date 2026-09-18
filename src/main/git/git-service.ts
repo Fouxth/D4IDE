@@ -1,13 +1,51 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { GitStatusSummary } from '../../shared/types';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+  remote?: string;
+}
+
+export interface GitLogEntry {
+  hash: string;
+  message: string;
+  author: string;
+  date: string;
+}
+
+export interface GitCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
 
 export class GitService {
+  private async git(cwd: string, args: string[]): Promise<string> {
+    const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 10 * 1024 * 1024, windowsHide: true });
+    return stdout;
+  }
+
+  /** Run a git command without throwing, for the agent's tool surface. */
+  async run(cwd: string, args: string[]): Promise<GitCommandResult> {
+    try {
+      const stdout = await this.git(cwd, args);
+      return { stdout, stderr: '', exitCode: 0 };
+    } catch (e: any) {
+      return {
+        stdout: e?.stdout?.toString?.() ?? '',
+        stderr: e?.stderr?.toString?.() ?? e?.message ?? 'git command failed',
+        exitCode: typeof e?.code === 'number' ? e.code : 1
+      };
+    }
+  }
+
   async isGitRepo(cwd: string): Promise<boolean> {
     try {
-      await execAsync('git rev-parse --is-inside-work-tree', { cwd });
+      await this.git(cwd, ['rev-parse', '--is-inside-work-tree']);
       return true;
     } catch {
       return false;
@@ -16,10 +54,8 @@ export class GitService {
 
   async getStatus(cwd: string): Promise<GitStatusSummary> {
     try {
-      const { stdout: branchOut } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd });
-      const branch = branchOut.trim();
-
-      const { stdout: statusOut } = await execAsync('git status --porcelain', { cwd });
+      const branch = (await this.git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+      const statusOut = await this.git(cwd, ['status', '--porcelain']);
       const lines = statusOut.split('\n').filter(Boolean);
 
       const staged: string[] = [];
@@ -39,56 +75,58 @@ export class GitService {
         }
       }
 
-      return {
-        branch,
-        isClean: lines.length === 0,
-        staged,
-        unstaged,
-        untracked
-      };
+      return { branch, isClean: lines.length === 0, staged, unstaged, untracked };
     } catch {
-      return {
-        branch: 'unknown',
-        isClean: true,
-        staged: [],
-        unstaged: [],
-        untracked: []
-      };
+      return { branch: 'unknown', isClean: true, staged: [], unstaged: [], untracked: [] };
     }
   }
 
-  async getDiff(cwd: string, filePath?: string): Promise<string> {
-    try {
-      const target = filePath ? ` -- "${filePath}"` : '';
-      const { stdout } = await execAsync(`git diff${target}`, { cwd });
-      return stdout;
-    } catch (e: any) {
-      return e.message || '';
-    }
+  async getDiff(cwd: string, filePath?: string, staged = false): Promise<string> {
+    const args = staged ? ['diff', '--cached'] : ['diff'];
+    if (filePath) args.push('--', filePath);
+    const result = await this.run(cwd, args);
+    return result.stdout || result.stderr;
   }
 
-  async getLog(cwd: string, limit = 15): Promise<{ hash: string; message: string; author: string; date: string }[]> {
-    try {
-      const { stdout } = await execAsync(`git log -n ${limit} --pretty=format:"%h|%an|%ad|%s" --date=short`, { cwd });
-      return stdout.split('\n').filter(Boolean).map((line) => {
+  async getLog(cwd: string, limit = 15): Promise<GitLogEntry[]> {
+    const result = await this.run(cwd, [
+      'log',
+      `-n`,
+      String(Math.max(1, Math.min(limit, 200))),
+      '--pretty=format:%h|%an|%ad|%s',
+      '--date=short'
+    ]);
+    if (!result.stdout.trim()) return [];
+    return result.stdout
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
         const [hash, author, date, ...msgParts] = line.split('|');
-        return {
-          hash,
-          author,
-          date,
-          message: msgParts.join('|')
-        };
+        return { hash, author, date, message: msgParts.join('|') };
       });
-    } catch {
-      return [];
-    }
+  }
+
+  async getBranches(cwd: string): Promise<GitBranchInfo[]> {
+    const result = await this.run(cwd, ['branch', '--no-color']);
+    if (!result.stdout.trim()) return [];
+    return result.stdout
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((line) => {
+        const current = line.startsWith('*');
+        const name = line.replace(/^\*?\s*/, '').trim();
+        return { name, current };
+      });
   }
 
   async commit(cwd: string, message: string): Promise<string> {
-    // Stage all and commit
-    await execAsync('git add -A', { cwd });
-    const { stdout } = await execAsync(`git commit -m "${message.replace(/"/g, '\\"')}"`, { cwd });
-    return stdout;
+    // Argument arrays avoid quoting/injection problems entirely.
+    await this.git(cwd, ['add', '-A']);
+    const result = await this.run(cwd, ['commit', '-m', message]);
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr.trim() || `git commit failed with code ${result.exitCode}`);
+    }
+    return result.stdout;
   }
 }
 

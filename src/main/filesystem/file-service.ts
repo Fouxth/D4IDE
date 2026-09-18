@@ -8,57 +8,152 @@ const IGNORED_DIRS = new Set([
   'dist',
   'dist-electron',
   'build',
+  'out',
   '.next',
   '.nuxt',
   'coverage',
   'vendor',
   '.vscode',
-  '.idea'
+  '.idea',
+  '.turbo',
+  '.cache',
+  '__pycache__',
+  'target',
+  'release'
 ]);
 
+const BINARY_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.ico',
+  '.webp',
+  '.pdf',
+  '.exe',
+  '.dll',
+  '.so',
+  '.dylib',
+  '.bin',
+  '.zip',
+  '.gz',
+  '.tar',
+  '.7z',
+  '.mp3',
+  '.mp4',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.lock'
+]);
+
+interface IgnoreRule {
+  regex: RegExp;
+  negated: boolean;
+}
+
+/**
+ * Compiles `.gitignore` / `.d4ideignore` entries into match rules.
+ * Supports the common subset: comments, negation, directory-only patterns,
+ * anchored patterns and `**` wildcards.
+ */
+export function compileIgnorePatterns(lines: string[]): IgnoreRule[] {
+  const rules: IgnoreRule[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const negated = line.startsWith('!');
+    let pattern = negated ? line.slice(1) : line;
+    const directoryOnly = pattern.endsWith('/');
+    if (directoryOnly) pattern = pattern.slice(0, -1);
+
+    const anchored = pattern.startsWith('/');
+    if (anchored) pattern = pattern.slice(1);
+    if (!pattern) continue;
+
+    const body = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*\*/g, '\u0000')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\?/g, '[^/]')
+      .replace(/\u0000/g, '.*');
+
+    // Unanchored patterns match at any depth; anchored ones match from the root.
+    const prefix = anchored ? '^' : '(^|/)';
+    const suffix = directoryOnly ? '(/|$)' : '(/.*)?$';
+    rules.push({ regex: new RegExp(`${prefix}${body}${suffix}`), negated });
+  }
+  return rules;
+}
+
+export function isIgnored(relativePath: string, rules: IgnoreRule[]): boolean {
+  const normalized = relativePath.replace(/\\/g, '/').replace(/^\.\//, '');
+  let ignored = false;
+  for (const rule of rules) {
+    if (rule.regex.test(normalized)) {
+      ignored = !rule.negated;
+    }
+  }
+  return ignored;
+}
+
 export class FileService {
-  getTree(dirPath: string, maxDepth = 6, currentDepth = 0): FileNode {
+  /** Read and compile the project's ignore files. */
+  loadIgnoreRules(rootDir: string): IgnoreRule[] {
+    const files = ['.gitignore', '.d4ideignore', '.d4ide/.d4ideignore'];
+    const lines: string[] = [];
+    for (const rel of files) {
+      const full = path.join(rootDir, rel);
+      try {
+        if (fs.existsSync(full)) lines.push(...fs.readFileSync(full, 'utf8').split('\n'));
+      } catch {
+        // Ignore unreadable ignore files.
+      }
+    }
+    return compileIgnorePatterns(lines);
+  }
+
+  getTree(dirPath: string, maxDepth = 6, currentDepth = 0, rootDir?: string, rules?: IgnoreRule[]): FileNode {
+    const root = rootDir ?? dirPath;
+    const ignoreRules = rules ?? this.loadIgnoreRules(root);
     const stats = fs.statSync(dirPath);
     const node: FileNode = {
       name: path.basename(dirPath),
       path: dirPath,
-      relativePath: '',
+      relativePath: path.relative(root, dirPath).replace(/\\/g, '/'),
       isDirectory: stats.isDirectory()
     };
 
-    if (!stats.isDirectory() || currentDepth >= maxDepth) {
-      return node;
-    }
+    if (!stats.isDirectory() || currentDepth >= maxDepth) return node;
 
     try {
       const entries = fs.readdirSync(dirPath, { withFileTypes: true });
       const children: FileNode[] = [];
 
       for (const entry of entries) {
-        if (entry.isDirectory() && IGNORED_DIRS.has(entry.name)) {
-          continue;
-        }
-
+        if (entry.isDirectory() && IGNORED_DIRS.has(entry.name)) continue;
         const fullPath = path.join(dirPath, entry.name);
+        const rel = path.relative(root, fullPath).replace(/\\/g, '/');
+        if (isIgnored(rel, ignoreRules)) continue;
+
         try {
           if (entry.isDirectory()) {
-            children.push(this.getTree(fullPath, maxDepth, currentDepth + 1));
+            children.push(this.getTree(fullPath, maxDepth, currentDepth + 1, root, ignoreRules));
           } else {
-            const fileStat = fs.statSync(fullPath);
             children.push({
               name: entry.name,
               path: fullPath,
-              relativePath: '',
+              relativePath: rel,
               isDirectory: false,
-              size: fileStat.size
+              size: fs.statSync(fullPath).size
             });
           }
         } catch {
-          // Ignore unreadable entries
+          // Skip unreadable entries.
         }
       }
 
-      // Sort directories first, then alphabetical
       children.sort((a, b) => {
         if (a.isDirectory && !b.isDirectory) return -1;
         if (!a.isDirectory && b.isDirectory) return 1;
@@ -82,9 +177,7 @@ export class FileService {
 
   writeFile(filePath: string, content: string): void {
     const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, content, 'utf8');
   }
 
@@ -96,53 +189,58 @@ export class FileService {
   }
 
   deleteFile(filePath: string): void {
-    if (!fs.existsSync(filePath)) {
-      return;
-    }
+    if (!fs.existsSync(filePath)) return;
     const stat = fs.statSync(filePath);
-    if (stat.isDirectory()) {
-      fs.rmSync(filePath, { recursive: true, force: true });
-    } else {
-      fs.unlinkSync(filePath);
-    }
+    if (stat.isDirectory()) fs.rmSync(filePath, { recursive: true, force: true });
+    else fs.unlinkSync(filePath);
   }
 
   renameFile(oldPath: string, newPath: string): void {
-    if (!fs.existsSync(oldPath)) {
-      throw new Error(`Path does not exist: ${oldPath}`);
-    }
+    if (!fs.existsSync(oldPath)) throw new Error(`Path does not exist: ${oldPath}`);
     const dir = path.dirname(newPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.renameSync(oldPath, newPath);
+  }
+
+  /** Walk the tree once, honouring ignore rules, and hand every file to the visitor. */
+  private walkFiles(rootDir: string, visitor: (fullPath: string, relativePath: string) => boolean | void): void {
+    const rules = this.loadIgnoreRules(rootDir);
+    const walk = (current: string): boolean => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(current, { withFileTypes: true });
+      } catch {
+        return false;
+      }
+
+      for (const entry of entries) {
+        if (entry.isDirectory() && IGNORED_DIRS.has(entry.name)) continue;
+        const fullPath = path.join(current, entry.name);
+        const rel = path.relative(rootDir, fullPath).replace(/\\/g, '/');
+        if (isIgnored(rel, rules)) continue;
+
+        if (entry.isDirectory()) {
+          if (walk(fullPath)) return true;
+        } else {
+          if (visitor(fullPath, rel)) return true;
+        }
+      }
+      return false;
+    };
+    walk(rootDir);
   }
 
   searchFiles(rootDir: string, query: string, maxResults = 100): string[] {
     const results: string[] = [];
     const lowerQuery = query.toLowerCase();
 
-    const walk = (current: string) => {
-      if (results.length >= maxResults) return;
-      try {
-        const entries = fs.readdirSync(current, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.isDirectory()) {
-            if (IGNORED_DIRS.has(entry.name)) continue;
-            walk(path.join(current, entry.name));
-          } else {
-            if (entry.name.toLowerCase().includes(lowerQuery)) {
-              results.push(path.relative(rootDir, path.join(current, entry.name)));
-              if (results.length >= maxResults) break;
-            }
-          }
-        }
-      } catch {
-        // Skip permission errors
+    this.walkFiles(rootDir, (_full, rel) => {
+      if (path.basename(rel).toLowerCase().includes(lowerQuery)) {
+        results.push(rel);
+        if (results.length >= maxResults) return true;
       }
-    };
+    });
 
-    walk(rootDir);
     return results;
   }
 
@@ -150,48 +248,25 @@ export class FileService {
     const results: { file: string; line: number; text: string }[] = [];
     const lowerQuery = query.toLowerCase();
 
-    const walk = (current: string) => {
-      if (results.length >= maxResults) return;
-      try {
-        const entries = fs.readdirSync(current, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.isDirectory()) {
-            if (IGNORED_DIRS.has(entry.name)) continue;
-            walk(path.join(current, entry.name));
-          } else {
-            const ext = path.extname(entry.name).toLowerCase();
-            // Skip binary files
-            if (['.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf', '.exe', '.bin', '.dll', '.so'].includes(ext)) {
-              continue;
-            }
-            const fullPath = path.join(current, entry.name);
-            try {
-              const stat = fs.statSync(fullPath);
-              if (stat.size > 2 * 1024 * 1024) continue; // Skip files > 2MB
+    this.walkFiles(rootDir, (fullPath, rel) => {
+      const ext = path.extname(fullPath).toLowerCase();
+      if (BINARY_EXTENSIONS.has(ext)) return;
 
-              const content = fs.readFileSync(fullPath, 'utf8');
-              const lines = content.split('\n');
-              for (let i = 0; i < lines.length; i++) {
-                if (lines[i].toLowerCase().includes(lowerQuery)) {
-                  results.push({
-                    file: path.relative(rootDir, fullPath),
-                    line: i + 1,
-                    text: lines[i].trim()
-                  });
-                  if (results.length >= maxResults) return;
-                }
-              }
-            } catch {
-              // Skip unreadable files
-            }
+      try {
+        if (fs.statSync(fullPath).size > 2 * 1024 * 1024) return;
+        const content = fs.readFileSync(fullPath, 'utf8');
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].toLowerCase().includes(lowerQuery)) {
+            results.push({ file: rel, line: i + 1, text: lines[i].trim().slice(0, 400) });
+            if (results.length >= maxResults) return true;
           }
         }
       } catch {
-        // Skip errors
+        // Skip unreadable files.
       }
-    };
+    });
 
-    walk(rootDir);
     return results;
   }
 }

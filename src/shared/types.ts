@@ -1,5 +1,8 @@
 // Shared types between Main, Preload, and Renderer processes
 
+export type { DesignStyle } from './design-profiles';
+import type { DesignStyle } from './design-profiles';
+
 export type PermissionMode = 'safe' | 'ask' | 'full';
 
 export type WorkspaceMode = 'agent' | 'code';
@@ -13,24 +16,91 @@ export interface ModelInfo {
   name: string;
   providerId: string;
   contextWindow?: number;
+  maxOutputTokens?: number;
   supportsTools: boolean;
   supportsVision: boolean;
   supportsReasoning?: boolean;
+  supportsCaching?: boolean;
   inputPricePerMillion?: number;
   outputPricePerMillion?: number;
   cachedInputPricePerMillion?: number;
+  /** Where this model entry came from: shipped preset, fetched from the provider API, or typed by the user. */
+  source?: 'builtin' | 'fetched' | 'manual';
 }
+
+/**
+ * Which wire protocol a provider speaks — not which company it is.
+ *
+ * `openai` is chat-completions, `anthropic` is `/messages`, `gemini` is Google's
+ * `:streamGenerateContent`, and `responses` is OpenAI's newer `/responses`. The
+ * distinction matters because one vendor can need several of them: OpenCode's
+ * gateways serve GPT and Grok only on `/responses`, Claude and Qwen only on
+ * `/messages`, and Gemini on the Google shape — the same key, three protocols.
+ */
+export type ProviderType =
+  | 'openai'
+  | 'anthropic'
+  | 'gemini'
+  | 'responses'
+  | 'deepseek'
+  | 'openrouter'
+  | 'xai'
+  | 'ollama'
+  | 'custom';
+
+export type ProviderStatus = 'connected' | 'not_configured' | 'error' | 'local' | 'unknown';
 
 export interface ProviderConfig {
   id: string;
   name: string;
-  type: 'openai' | 'anthropic' | 'gemini' | 'deepseek' | 'openrouter' | 'xai' | 'ollama' | 'custom';
+  type: ProviderType;
   enabled: boolean;
+  /**
+   * Where this provider lists models, when that is not `{baseUrl}/models`.
+   * Perplexity is the shipped example: chat at the root, catalogue under `/v1`.
+   */
+  modelsPath?: string;
+  /**
+   * Encrypted API key. Only ever populated inside the main process.
+   * IPC responses carry `hasApiKey` / `apiKeyPreview` instead (spec §29).
+   */
   apiKey?: string;
   baseUrl?: string;
   models: ModelInfo[];
   isCustom?: boolean;
+  isBuiltIn?: boolean;
+  docsUrl?: string;
+  requiresApiKey?: boolean;
+  headers?: Record<string, string>;
+  /** Sanitized flag: an API key is stored for this provider. */
+  hasApiKey?: boolean;
+  /** Sanitized masked preview, e.g. "••••1a2b". */
+  apiKeyPreview?: string;
+  status?: ProviderStatus;
+  lastTestedAt?: number;
+  lastError?: string;
+  latencyMs?: number;
+  modelCount?: number;
 }
+
+export interface ProviderTestResult {
+  success: boolean;
+  error?: string;
+  errorKind?: ProviderErrorKind;
+  latencyMs?: number;
+  modelCount?: number;
+}
+
+export type ProviderErrorKind =
+  | 'invalid_key'
+  | 'rate_limit'
+  | 'unavailable'
+  | 'timeout'
+  | 'model_not_found'
+  | 'context_exceeded'
+  | 'bad_request'
+  | 'cancelled'
+  | 'unknown';
 
 export interface ChatMessage {
   id: string;
@@ -40,6 +110,8 @@ export interface ChatMessage {
   toolCallId?: string;
   name?: string;
   timestamp: number;
+  /** Images attached to a user turn, sent only to vision-capable models (§52). */
+  images?: PromptImage[];
 }
 
 export interface ToolCall {
@@ -61,15 +133,31 @@ export interface AgentTodo {
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
 }
 
+/** Specialised helper agents the main agent may delegate to (spec §81). */
+export type SubagentRole = 'explore' | 'review' | 'test' | 'debug' | 'frontend' | 'database';
+
 export interface AgentTimelineItem {
   id: string;
-  type: 'thinking' | 'tool_call' | 'tool_result' | 'plan' | 'message' | 'error' | 'summary';
+  type:
+    | 'thinking'
+    | 'tool_call'
+    | 'tool_result'
+    | 'plan'
+    | 'design'
+    | 'message'
+    | 'error'
+    | 'summary'
+    | 'subagent';
   title: string;
   content?: string;
   timestamp: number;
   toolCall?: ToolCall;
   toolResult?: ToolResult;
   status?: 'running' | 'success' | 'failed' | 'cancelled';
+  /** Set when the item belongs to a delegated subagent run (spec §81). */
+  agent?: SubagentRole;
+  /** Screenshot captured by a browser tool, as a file path inside the project. */
+  imagePath?: string;
   details?: any;
 }
 
@@ -80,7 +168,47 @@ export interface PlanData {
   estimatedScope: string;
   risk: 'Low' | 'Medium' | 'High';
   approved?: boolean;
+  /** How far the user let the approved plan run (spec §35). */
+  scope?: PlanScope;
 }
+
+/**
+ * Approving a plan is not all-or-nothing: the user picks how far the agent may
+ * go before it stops and asks again.
+ *
+ *   · `full`  — run the whole plan through to the summary.
+ *   · `step`  — run one step, then wait for approval of the next.
+ *   · `first` — run only the first step, then wait.
+ */
+export type PlanScope = 'full' | 'step' | 'first';
+
+/**
+ * The style chooser the agent raises before it writes any UI.
+ *
+ * "Make it beautiful" is not a specification, and the user should not have to
+ * repeat one in every prompt either. So on the first UI request in a project
+ * with no style recorded, the agent asks — once, with the options laid out — and
+ * the answer is remembered for that project from then on.
+ */
+export interface DesignChoiceRequest {
+  /** Project the choice will be remembered for. */
+  projectPath: string;
+  /** The style currently recorded, when there is one. */
+  current?: string;
+  language: 'th' | 'en';
+}
+
+/** What the user did with the plan card. */
+export interface PlanDecision {
+  action: 'approve' | 'revise' | 'cancel';
+  /** Chosen when `action` is `approve`; defaults to `full`. */
+  scope?: PlanScope;
+  /** What to change when `action` is `revise`. */
+  feedback?: string;
+}
+
+/** Answer to the gate that pauses the build loop between steps. */
+export type PlanStepDecision = 'continue' | 'runAll' | 'stop';
 
 export interface TaskQueueItem {
   id: string;
@@ -121,13 +249,187 @@ export interface FileNode {
 }
 
 export interface UsageRecord {
+  id: string;
+  sessionId: string;
   inputTokens: number;
   outputTokens: number;
-  cachedTokens?: number;
+  cachedInputTokens?: number;
+  reasoningTokens?: number;
   estimatedCost: number;
   providerId: string;
+  providerName?: string;
   modelId: string;
+  modelName?: string;
+  projectPath?: string;
+  mode?: AgentMode;
+  status: 'completed' | 'failed' | 'cancelled' | 'partial';
+  durationMs?: number;
   timestamp: number;
+}
+
+export interface UsageAggregate {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  cost: number;
+}
+
+export interface UsageBucket extends UsageAggregate {
+  key: string;
+  label: string;
+}
+
+export interface BudgetStatus {
+  perRequest: number;
+  daily: number;
+  monthly: number;
+  warnThreshold: number;
+  hardStop: boolean;
+  dailySpent: number;
+  monthlySpent: number;
+  dailyPct: number;
+  monthlyPct: number;
+  warn: boolean;
+  exceeded: boolean;
+}
+
+export interface UsageSummary {
+  session: UsageAggregate;
+  today: UsageAggregate;
+  month: UsageAggregate;
+  allTime: UsageAggregate;
+  byProvider: UsageBucket[];
+  byModel: UsageBucket[];
+  byProject: UsageBucket[];
+  recent: UsageRecord[];
+  budget: BudgetStatus;
+}
+
+export interface ToolAuditEntry {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  argsPreview: string;
+  mode: PermissionMode;
+  allowed: boolean;
+  requiresApproval: boolean;
+  decision?: 'approved' | 'approved_for_session' | 'rejected' | 'auto';
+  reason?: string;
+  durationMs?: number;
+  timestamp: number;
+}
+
+export interface ApprovalRequest {
+  id: string;
+  sessionId: string;
+  toolCall: ToolCall;
+  mode: PermissionMode;
+  reason?: string;
+  timestamp: number;
+}
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  projectPath: string;
+  providerId: string;
+  modelId: string;
+  createdAt: number;
+  updatedAt: number;
+  status: AgentStatus;
+}
+
+/**
+ * Sign-in (spec §7). The app is usable only after GitHub or Google sign-in, so
+ * the identity and the gate state are shared between main and renderer.
+ */
+export type AuthProvider = 'github' | 'google';
+
+export interface AuthProfile {
+  provider: AuthProvider;
+  id: string;
+  login: string;
+  name: string;
+  email?: string;
+  avatarUrl?: string;
+}
+
+export interface AuthState {
+  signedIn: boolean;
+  profile: AuthProfile | null;
+  signedInAt?: number;
+  /** A client id is configured, so the flow can actually start. */
+  githubReady: boolean;
+  googleReady: boolean;
+  /** The gate is switched on in settings. */
+  required: boolean;
+}
+
+/** The GitHub device-flow code the user has to enter on github.com. */
+export interface DeviceCodePrompt {
+  userCode: string;
+  verificationUri: string;
+  expiresAt: number;
+  intervalMs: number;
+  /** Set for the Google flow, whose URL is opened directly. */
+  browserOpened?: boolean;
+}
+
+export interface DatabaseTableInfo {
+  name: string;
+  rows: number;
+}
+
+export interface DatabaseBackupInfo {
+  name: string;
+  sizeBytes: number;
+  modifiedAt: number;
+}
+
+/** What Settings → Database reports about the SQLite file (spec §45). */
+export interface DatabaseInfo {
+  file: string;
+  dataDir: string;
+  sizeBytes: number;
+  walBytes: number;
+  /** Revision the file is on, and the revision this build expects. */
+  version: number;
+  targetVersion: number;
+  journalMode: string;
+  pageSize: number;
+  pageCount: number;
+  freePages: number;
+  tables: DatabaseTableInfo[];
+  backups: DatabaseBackupInfo[];
+  /** Set when a damaged file was moved aside and a fresh one created. */
+  quarantinedFile: string | null;
+  /** False when the file was written by a newer build than this one. */
+  healthy: boolean;
+}
+
+export interface DatabaseCheckResult {
+  ok: boolean;
+  problems: string[];
+  checkedAt: number;
+}
+
+/**
+ * Everything needed to replay a finished or interrupted run (spec §45). Written
+ * continuously while the agent works, so a crash still leaves a usable trail.
+ */
+export interface SessionTranscript {
+  sessionId: string;
+  projectPath: string;
+  timeline: AgentTimelineItem[];
+  todos: AgentTodo[];
+  plan: PlanData | null;
+  updatedAt: number;
+  /** False while a run is in flight — a restart can then offer recovery (§84). */
+  endedCleanly: boolean;
+  /** Mission in force for this session (spec §40). */
+  mission?: Mission | null;
 }
 
 export interface AppSettings {
@@ -141,12 +443,136 @@ export interface AppSettings {
   maxAgentSteps: number;
   activeProviderId: string;
   activeModelId: string;
+  routingProfile: 'quality' | 'balanced' | 'cost' | 'fast';
   reasoningEffort: 'off' | 'low' | 'medium' | 'high' | 'auto';
   dailyBudget: number;
   monthlyBudget: number;
   perRequestBudget: number;
+  budgetHardStop: boolean;
+  /**
+   * Engage the cheaper limits automatically once spending passes the warning
+   * threshold. Warning alone never reduced a bill; this is what protects the
+   * budget the user set (spec §36/§39).
+   */
+  autoThriftOnBudget: boolean;
+  budgetWarnThreshold: number;
+  /**
+   * Token economy. These are engine settings, not prompt wording: `/thrift`
+   * flips `thriftMode` and the runtime changes what it actually sends.
+   */
+  thriftMode: boolean;
+  /** Ceiling on the tokens carried by one request (0 = the default). */
+  contextTokenBudget: number;
+  /** Ceiling on the tokens one task may spend in total (0 = no ceiling). */
+  runTokenBudget: number;
+  /** Send small jobs (subagents, read-only work) to a cheaper model. */
+  cheaperModelForSmallTasks: boolean;
+  /** Provider/model used for those small jobs, `provider:model`. */
+  cheapModelId: string;
+  autoFallback: boolean;
+  fallbackChain: string[];
+  toolTimeoutMs: number;
+  retryLimit: number;
+  checkpointFrequency: 'off' | 'task' | 'write';
+  favoriteModels: string[];
+  recentModels: string[];
   recentProjects: string[];
+  /**
+   * The order the user dragged the session strip into (session ids).
+   *
+   * Persisted rather than kept in the renderer so it survives a restart, and
+   * stored as a whole order instead of a position per session so a list whose
+   * contents changed still lands somewhere sensible.
+   */
+  sessionOrder: string[];
   firstRunComplete: boolean;
+  /** Built-in providers the user removed — they must not come back on restart. */
+  removedProviderIds: string[];
+  /** Structured log verbosity (spec §66). */
+  logLevel: LogLevel;
+  /** OS notifications when the window is not focused (spec §53). */
+  desktopNotifications: boolean;
+  /** Visual direction D4IDE applies to UI work; "ask" makes the agent ask first. */
+  designStyle: DesignStyle;
+  /** Ask before writing UI when the project has no style chosen yet. */
+  askDesignBeforeUiWork: boolean;
+  /** Remember what the project is, in the project itself, across sessions. */
+  projectMemoryEnabled: boolean;
+
+  // ------------------------------------------------------------- sign-in
+  /** The whole app is locked behind GitHub or Google sign-in (spec §7). */
+  requireLogin: boolean;
+  /**
+   * Public client ids for the sign-in flows. These are not secrets — they are
+   * how the app identifies itself to GitHub/Google — so they live in settings
+   * where they can be changed without rebuilding.
+   */
+  githubClientId?: string;
+  googleClientId?: string;
+}
+
+/** Log streams the app keeps apart (spec §66). */
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type LogChannel = 'app' | 'agent' | 'provider' | 'terminal';
+
+export interface LogRecord {
+  id: string;
+  channel: LogChannel;
+  level: LogLevel;
+  message: string;
+  context?: Record<string, unknown>;
+  timestamp: number;
+}
+
+/**
+ * Mission: persistent, session-scoped context (spec §40). It is deliberately
+ * separate from project rules — rules are committed with the repository, a
+ * mission belongs to what the user is doing right now.
+ */
+export interface Mission {
+  objective: string;
+  constraints: string;
+  codingStyle: string;
+  importantFiles: string[];
+  forbiddenActions: string;
+  effort: 'low' | 'medium' | 'high';
+}
+
+export const EMPTY_MISSION: Mission = {
+  objective: '',
+  constraints: '',
+  codingStyle: '',
+  importantFiles: [],
+  forbiddenActions: '',
+  effort: 'medium'
+};
+
+/** An image the user attached to a prompt (spec §52). */
+export interface PromptImage {
+  id: string;
+  name: string;
+  mimeType: string;
+  /** Base64 payload without the data-URL prefix. */
+  data: string;
+  bytes: number;
+}
+
+/** Unsaved editor buffers, persisted so a crash does not lose them (spec §84). */
+export interface BufferSnapshot {
+  path: string;
+  relativePath: string;
+  content: string;
+  dirty: boolean;
+  savedAt: number;
+}
+
+export interface UpdateStatus {
+  state: 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error' | 'unsupported';
+  version?: string;
+  notes?: string;
+  percent?: number;
+  error?: string;
+  checkedAt?: number;
 }
 
 export interface ContextItem {
@@ -167,14 +593,28 @@ export interface SkillItem {
   isGlobal: boolean;
 }
 
+/**
+ * Transport for an MCP server (spec §42). Stdio is the default because most
+ * published servers are local processes; HTTP covers the hosted ones.
+ */
+export type McpTransport = 'stdio' | 'http';
+
 export interface McpServerConfig {
   id: string;
   name: string;
+  transport?: McpTransport;
+  /** stdio: executable to spawn. */
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /** http: full endpoint URL, e.g. https://api.example.com/mcp. */
+  url?: string;
+  /** http: extra request headers, e.g. an authorization token. */
+  headers?: Record<string, string>;
   enabled: boolean;
   status: 'connected' | 'disconnected' | 'connecting' | 'error';
+  /** Last connection error, surfaced in Settings → MCP. */
+  error?: string;
 }
 
 export interface GitStatusSummary {
@@ -183,4 +623,48 @@ export interface GitStatusSummary {
   staged: string[];
   unstaged: string[];
   untracked: string[];
+}
+
+/**
+ * The datastore a project is built on (for the project database panel).
+ *
+ * Detected from the project's own files — a driver in `package.json`, a Prisma
+ * provider, a compose service, a connection URL in `.env` — never guessed. A
+ * connection URL is parsed down to host/port/database before it travels, so no
+ * credential can reach the interface or a log through this type.
+ */
+export type DatabaseEngine =
+  | 'postgresql'
+  | 'mysql'
+  | 'mariadb'
+  | 'mongodb'
+  | 'sqlite'
+  | 'libsql'
+  | 'redis'
+  | 'clickhouse'
+  | 'dynamodb'
+  | 'firestore'
+  | 'mssql'
+  | 'oracle'
+  | 'unknown';
+
+export interface DatabaseFinding {
+  engine: DatabaseEngine;
+  /** A cache is not a database, but it is worth knowing about. */
+  kind: 'database' | 'cache';
+  /** Drivers that imply this engine, e.g. ["pg"]. */
+  clients: string[];
+  evidence: Array<{ file: string; detail: string }>;
+  /** Read from a connection URL, with the user and password removed. */
+  target?: { host?: string; port?: number; database?: string; user?: string };
+  /** Environment variables the project expects but does not define. */
+  missingEnv: string[];
+}
+
+export interface ProjectDatabaseReport {
+  /** Files that were actually read — evidence that detection really looked. */
+  scanned: string[];
+  databases: DatabaseFinding[];
+  /** ORMs and query builders, which say how the data is used but not on what. */
+  tooling: string[];
 }
