@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Search, FileCode, X } from 'lucide-react';
-import { useProjectStore } from '../../stores/projectStore';
+import { useProject } from '../../stores/projectStore';
+import { useEscapeToClose } from '../../lib/use-escape';
 import path from 'path';
 
 interface SearchModalProps {
@@ -12,7 +13,10 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose }) => 
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<{ file: string; line?: number; text?: string }[]>([]);
   const [searchMode, setSearchMode] = useState<'filename' | 'content'>('filename');
-  const { projectPath, openFile } = useProjectStore();
+  const { projectPath, openFile } = useProject((s) => ({
+    projectPath: s.projectPath,
+    openFile: s.openFile
+  }));
 
   useEffect(() => {
     if (!isOpen) {
@@ -21,6 +25,8 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose }) => 
       return;
     }
   }, [isOpen]);
+
+  useEscapeToClose(isOpen, onClose);
 
   useEffect(() => {
     if (!query.trim() || !projectPath || !window.electronAPI) {

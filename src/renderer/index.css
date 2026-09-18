@@ -2,17 +2,76 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Colour tokens (spec §58-§59). Values are space-separated RGB channels so
+ * Tailwind's `/opacity` modifiers keep working through `rgb(var(--x) / <alpha>)`.
+ *
+ * D4 Dark: true-black canvas, charcoal panels, hairline borders, one teal accent.
+ */
+:root,
+.dark {
+  --d4-bg: 0 0 0;
+  --d4-panel: 9 9 11;
+  --d4-surface: 19 19 22;
+  --d4-subtle: 28 28 32;
+  --d4-border: 39 39 44;
+  --d4-border-subtle: 24 24 27;
+  --d4-text: 244 244 245;
+  --d4-muted: 161 161 170;
+  --d4-dimmed: 113 113 122;
+  --d4-accent: 20 184 166;
+  --d4-accent-hover: 13 148 136;
+  --d4-success: 16 185 129;
+  --d4-warning: 245 158 11;
+  --d4-error: 239 68 68;
+  --d4-info: 59 130 246;
+}
+
+.d4-light {
+  --d4-bg: 250 250 250;
+  --d4-panel: 255 255 255;
+  --d4-surface: 244 244 245;
+  --d4-subtle: 228 228 231;
+  --d4-border: 212 212 216;
+  --d4-border-subtle: 232 232 236;
+  --d4-text: 24 24 27;
+  --d4-muted: 82 82 91;
+  --d4-dimmed: 113 113 122;
+}
+
 @layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
   body {
-    @apply bg-[#0B0D11] text-[#F1F5F9] font-sans antialiased overflow-hidden select-none;
+    @apply bg-d4-bg text-d4-text font-sans antialiased overflow-hidden select-none;
     font-family: 'Inter', 'Noto Sans Thai', 'Leelawadee UI', 'Segoe UI', sans-serif;
+    font-size: 13px;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Inputs and the composer are the only places text selection is useful long-term,
+     but everything inside them must stay selectable. */
+  input,
+  textarea,
+  [contenteditable='true'],
+  .d4-selectable {
+    user-select: text;
+  }
+
+  :focus-visible {
+    outline: 1px solid rgb(var(--d4-accent) / 0.7);
+    outline-offset: 1px;
   }
 }
 
-/* Custom minimal dark scrollbars */
+/* Minimal dark scrollbars — visible only on hover, like a native IDE. */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -20,10 +79,42 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgb(var(--d4-border));
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgb(var(--d4-dimmed));
+}
+
+/* One shared surface style so panels look identical everywhere. */
+@layer components {
+  .d4-panel {
+    @apply bg-d4-panel border border-d4-border rounded-md;
+  }
+
+  .d4-row {
+    @apply flex items-center gap-2;
+  }
+
+  .d4-icon-button {
+    @apply flex items-center justify-center rounded-sm text-d4-muted hover:text-d4-text hover:bg-d4-surface transition-colors;
+  }
+
+  .d4-chip {
+    @apply flex items-center gap-1 px-2 py-1 bg-d4-surface border border-d4-border rounded-sm text-[11px] text-d4-muted hover:text-d4-text transition-colors;
+  }
+
+  .d4-label {
+    @apply text-[10px] uppercase tracking-wider font-semibold text-d4-dimmed;
+  }
+
+  /* The session rail scrolls but must not show a scrollbar (spec §58). */
+  .d4-scroll-none {
+    scrollbar-width: none;
+  }
+
+  .d4-scroll-none::-webkit-scrollbar {
+    display: none;
+  }
 }

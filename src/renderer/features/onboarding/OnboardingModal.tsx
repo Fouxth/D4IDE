@@ -1,8 +1,8 @@
 import React from 'react';
-import { Sparkles, FolderOpen, Key, Check, ArrowRight } from 'lucide-react';
+import { FolderOpen, Key, Check, ArrowRight, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { useProjectStore } from '../../stores/projectStore';
+import { useProject } from '../../stores/projectStore';
 
 interface OnboardingModalProps {
   isOpen: boolean;
@@ -12,10 +12,13 @@ interface OnboardingModalProps {
 
 export const OnboardingModal: React.FC<OnboardingModalProps> = ({ isOpen, onClose, onOpenSettings }) => {
   const { t } = useTranslation();
-  const { settings, setLanguage, updateSettings } = useSettingsStore();
-  const { setProjectPath } = useProjectStore();
+  const { settings, providers, loadSettings, setLanguage, updateSettings } = useSettingsStore();
+  const { setProjectPath } = useProject((s) => ({ setProjectPath: s.setProjectPath }));
 
   if (!isOpen || !settings) return null;
+
+  const configuredProviders = providers.filter((p) => p.hasApiKey).length;
+  const hasUsableProvider = providers.some((p) => p.hasApiKey || p.type === 'ollama');
 
   const handleSelectLanguage = (lang: 'th' | 'en') => {
     setLanguage(lang);
@@ -78,16 +81,30 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ isOpen, onClos
           </div>
         </div>
 
-        {/* Action buttons */}
-        <div className="space-y-2.5">
-          <button
-            onClick={handleOpenProject}
-            className="w-full flex items-center justify-center space-x-2 py-2.5 bg-d4-accent hover:bg-d4-accent-hover text-black font-semibold rounded-md shadow transition-colors text-sm"
-          >
-            <FolderOpen className="w-4 h-4" />
-            <span>{t('onboarding.openProject')}</span>
-          </button>
-
+        {/* Provider status: the agent cannot run without at least one key. */}
+        <div
+          className={`rounded-lg p-4 space-y-2 border ${
+            hasUsableProvider ? 'bg-emerald-500/5 border-emerald-500/30' : 'bg-amber-500/5 border-amber-500/30'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-d4-text flex items-center space-x-2">
+              <Key className={`w-4 h-4 ${hasUsableProvider ? 'text-emerald-400' : 'text-amber-400'}`} />
+              <span>{t('onboarding.providerStep')}</span>
+            </span>
+            <button
+              onClick={() => loadSettings()}
+              className="text-d4-dimmed hover:text-d4-text"
+              title={t('usage.refresh')}
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+          </div>
+          <p className="text-[11px] text-d4-muted leading-relaxed">
+            {hasUsableProvider
+              ? t('onboarding.providerReady', { count: configuredProviders })
+              : t('onboarding.providerMissing')}
+          </p>
           <button
             onClick={() => {
               onOpenSettings();
@@ -97,6 +114,17 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ isOpen, onClos
           >
             <Key className="w-4 h-4 text-amber-400" />
             <span>{t('onboarding.setupProvider')}</span>
+          </button>
+        </div>
+
+        {/* Action buttons */}
+        <div className="space-y-2.5">
+          <button
+            onClick={handleOpenProject}
+            className="w-full flex items-center justify-center space-x-2 py-2.5 bg-d4-accent hover:bg-d4-accent-hover text-black font-semibold rounded-md shadow transition-colors text-sm"
+          >
+            <FolderOpen className="w-4 h-4" />
+            <span>{t('onboarding.openProject')}</span>
           </button>
         </div>
 

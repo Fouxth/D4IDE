@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Folder, FolderOpen, File, ChevronRight, ChevronDown, Plus, FilePlus, RefreshCw } from 'lucide-react';
-import { useProjectStore } from '../../stores/projectStore';
+import { Folder, FolderOpen, File, ChevronRight, ChevronDown, RefreshCw, PanelLeftClose } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { useProject } from '../../stores/projectStore';
 import { FileNode } from '../../../shared/types';
 
 interface FileTreeItemProps {
@@ -10,7 +11,10 @@ interface FileTreeItemProps {
 
 const FileTreeItem: React.FC<FileTreeItemProps> = ({ node, depth }) => {
   const [isOpen, setIsOpen] = useState(depth === 0);
-  const { openFile, activeFilePath } = useProjectStore();
+  const { openFile, activeFilePath } = useProject((s) => ({
+    openFile: s.openFile,
+    activeFilePath: s.activeFilePath
+  }));
 
   const isSelected = activeFilePath === node.path;
 
@@ -56,20 +60,49 @@ const FileTreeItem: React.FC<FileTreeItemProps> = ({ node, depth }) => {
   );
 };
 
-export const FileExplorer: React.FC = () => {
-  const { fileTree, loadProjectTree, projectPath } = useProjectStore();
+interface FileExplorerProps {
+  /** Width comes from the shell so the drag handle next to it can resize it (§60). */
+  width?: number;
+  onClose?: () => void;
+}
+
+export const FileExplorer: React.FC<FileExplorerProps> = ({ width = 240, onClose }) => {
+  const { fileTree, loadProjectTree, projectPath } = useProject((s) => ({
+    fileTree: s.fileTree,
+    loadProjectTree: s.loadProjectTree,
+    projectPath: s.projectPath
+  }));
+  const { t } = useTranslation();
 
   return (
-    <div className="w-60 bg-d4-panel border-r border-d4-border flex flex-col h-full select-none text-xs">
+    <div
+      style={{ width }}
+      className="shrink-0 bg-d4-panel border-r border-d4-border flex flex-col h-full select-none text-xs"
+    >
       <div className="flex items-center justify-between px-3 py-2 border-b border-d4-border bg-d4-bg/40">
-        <span className="text-[11px] font-semibold uppercase text-d4-dimmed tracking-wider">Explorer</span>
-        <button
-          onClick={loadProjectTree}
-          className="p-1 text-d4-dimmed hover:text-d4-text rounded transition-colors"
-          title="Refresh"
-        >
-          <RefreshCw className="w-3 h-3" />
-        </button>
+        <span className="text-[11px] font-semibold uppercase text-d4-dimmed tracking-wider">
+          {t('explorer.title')}
+        </span>
+        <div className="flex items-center gap-0.5">
+          <button
+            onClick={loadProjectTree}
+            className="p-1 text-d4-dimmed hover:text-d4-text rounded transition-colors"
+            title={t('explorer.refresh')}
+            aria-label={t('explorer.refresh')}
+          >
+            <RefreshCw className="w-3 h-3" />
+          </button>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="p-1 text-d4-dimmed hover:text-d4-text rounded transition-colors"
+              title={t('panel.hide')}
+              aria-label={t('panel.hide')}
+            >
+              <PanelLeftClose className="w-3 h-3" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto py-2">
@@ -77,7 +110,7 @@ export const FileExplorer: React.FC = () => {
           <FileTreeItem node={fileTree} depth={0} />
         ) : (
           <div className="p-4 text-center text-d4-dimmed text-xs">
-            {projectPath ? 'Loading files...' : 'No folder opened'}
+            {projectPath ? t('explorer.loading') : t('explorer.noFolder')}
           </div>
         )}
       </div>
