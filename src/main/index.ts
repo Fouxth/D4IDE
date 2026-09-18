@@ -6,6 +6,7 @@ import { mcpClient } from './mcp/mcp-client';
 import { browserService } from './browser/browser-service';
 import { logService } from './logging/log-service';
 import { updateService } from './updater/update-service';
+import { catalogRefreshService } from './ai/providers/catalog-refresh';
 import { appStore } from './database/store';
 import { providerManager } from './ai/providers/provider-manager';
 import { applyPerformanceProfile } from './performance-profile';
@@ -155,6 +156,14 @@ app.whenReady().then(() => {
 
   createWindow();
   updateService.setWindowProvider(() => mainWindow);
+  // Detection only, and deliberately late: D4IDE looks for a newer build on its
+  // own so it can say so, but downloading, installing and restarting are always
+  // the user's click (see src/main/updater/update-service.ts).
+  updateService.start();
+  // Same rule for the model catalogue: ask the providers what they serve, stage
+  // the difference, and wait (see src/main/ai/providers/catalog-refresh.ts).
+  catalogRefreshService.setWindowProvider(() => mainWindow);
+  catalogRefreshService.start();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -164,6 +173,8 @@ app.whenReady().then(() => {
 // Never leave orphaned shells, MCP servers or automation browsers behind.
 app.on('before-quit', async () => {
   logService.info('app', 'Shutting down');
+  updateService.stop();
+  catalogRefreshService.stop();
   terminalService.killAll();
   await mcpClient.stopAll().catch(() => undefined);
   await browserService.close().catch(() => undefined);

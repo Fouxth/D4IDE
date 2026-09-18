@@ -144,9 +144,18 @@ export const IPC_CHANNELS = {
   SETTINGS_EXPORT: 'settings:export',
   SETTINGS_IMPORT: 'settings:import',
 
-  // Update system (spec §83)
+  // Update system (spec §83). Only `check` ever happens without a click.
   UPDATE_CHECK: 'update:check',
   UPDATE_DOWNLOAD: 'update:download',
   UPDATE_INSTALL: 'update:install',
-  UPDATE_STATUS: 'update:status'
+  UPDATE_SKIP: 'update:skip',
+  UPDATE_STATUS: 'update:status',
+
+  // Model catalogue (models and prices providers report). Staged, then applied
+  // by hand — the same "look, never apply" rule as updates.
+  CATALOG_STATUS: 'catalog:status',
+  CATALOG_CHECK: 'catalog:check',
+  CATALOG_APPLY: 'catalog:apply',
+  CATALOG_DISCARD: 'catalog:discard',
+  CATALOG_UNDO: 'catalog:undo'
 } as const;

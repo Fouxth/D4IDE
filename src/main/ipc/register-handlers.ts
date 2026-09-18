@@ -16,6 +16,7 @@ import { toolRegistry } from '../ai/tools/tool-registry';
 import { logService, LOG_CHANNELS } from '../logging/log-service';
 import { notificationService } from '../notifications/notification-service';
 import { updateService } from '../updater/update-service';
+import { catalogRefreshService } from '../ai/providers/catalog-refresh';
 import { describeRefusals, planCheckpointRestore } from '../checkpoints/checkpoint-policy';
 import { builtinCommandSkills } from '../../shared/builtin-commands';
 import { inspectProjectDatabase } from '../project/database-evidence';
@@ -233,11 +234,27 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     if (settings.permissionMode === 'full' && before.permissionMode !== 'full') {
       agentRuntime.approveAllPending('approved', mainWindow);
     }
+    if (
+      settings.catalogCheckEnabled !== before.catalogCheckEnabled ||
+      settings.catalogCheckIntervalHours !== before.catalogCheckIntervalHours
+    ) {
+      catalogRefreshService.reconfigure();
+    }
     if (settings.permissionMode !== before.permissionMode) {
       logService.info('app', 'Permission mode changed', {
         from: before.permissionMode,
         to: settings.permissionMode
       });
+    }
+    // The update switches are read when a check is scheduled, so a change has to
+    // be pushed rather than waited for — turning checking off must cancel the
+    // timer that is already running, not the next one.
+    if (
+      settings.updateCheckEnabled !== before.updateCheckEnabled ||
+      settings.checkUpdatesOnLaunch !== before.checkUpdatesOnLaunch ||
+      settings.updateCheckIntervalHours !== before.updateCheckIntervalHours
+    ) {
+      updateService.reconfigure();
     }
     return settings;
   });
@@ -375,7 +392,11 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     ) => {
       // The updater never restarts the app mid-task (spec §83).
       updateService.setAgentBusy(true);
-      agentRuntime.run(mainWindow, args).finally(() => updateService.setAgentBusy(false));
+      catalogRefreshService.setAgentBusy(true);
+      agentRuntime.run(mainWindow, args).finally(() => {
+        updateService.setAgentBusy(false);
+        catalogRefreshService.setAgentBusy(false);
+      });
       return true;
     }
   );
@@ -821,7 +842,15 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.UPDATE_CHECK, () => updateService.check());
   ipcMain.handle(IPC_CHANNELS.UPDATE_DOWNLOAD, () => updateService.download());
   ipcMain.handle(IPC_CHANNELS.UPDATE_INSTALL, () => updateService.install());
+  ipcMain.handle(IPC_CHANNELS.UPDATE_SKIP, (_event, version: string) => updateService.skipVersion(version));
   ipcMain.handle(IPC_CHANNELS.UPDATE_STATUS, () => updateService.getStatus());
+
+  // ------------------------------------------------------- model catalogue
+  ipcMain.handle(IPC_CHANNELS.CATALOG_STATUS, () => catalogRefreshService.getStatus());
+  ipcMain.handle(IPC_CHANNELS.CATALOG_CHECK, () => catalogRefreshService.check('manual'));
+  ipcMain.handle(IPC_CHANNELS.CATALOG_APPLY, () => catalogRefreshService.apply());
+  ipcMain.handle(IPC_CHANNELS.CATALOG_DISCARD, () => catalogRefreshService.discard());
+  ipcMain.handle(IPC_CHANNELS.CATALOG_UNDO, () => catalogRefreshService.undo());
 
   logService.info('app', 'IPC handlers registered', { channels: LOG_CHANNELS.length + Object.keys(IPC_CHANNELS).length });
 }

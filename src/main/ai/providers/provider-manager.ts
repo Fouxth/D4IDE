@@ -229,7 +229,32 @@ export class ProviderManager {
     return result;
   }
 
-  /** Discover live models from the provider API (spec §26 `listModels`). */
+  /**
+   * Ask the provider what it serves without storing the answer.
+   *
+   * The catalogue check previews before it applies, so it must be able to look
+   * without writing: a check that has already changed the provider list cannot
+   * be declined. `refreshModels` below is the apply half of the same call.
+   */
+  async discoverModels(providerId: string): Promise<{ success: boolean; models?: ModelInfo[]; error?: string }> {
+    const conf = appStore.getProviders().find((c) => c.id === providerId);
+    if (!conf) return { success: false, error: 'Provider not found' };
+
+    try {
+      const instance = this.getProvider(providerId) ?? this.createInstance(conf);
+      return { success: true, models: await instance.listModels() };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Failed to fetch models' };
+    }
+  }
+
+  /**
+   * Discover live models from the provider API and store them (spec §26).
+   *
+   * Applies immediately, so it keeps the previous value wherever the user may
+   * have tuned one. The scheduled catalogue check is the reviewed path and uses
+   * `diffAndMergeModels` instead — see `catalog-refresh.ts` for why they differ.
+   */
   async refreshModels(providerId: string): Promise<{ success: boolean; models?: ModelInfo[]; error?: string }> {
     const conf = appStore.getProviders().find((c) => c.id === providerId);
     if (!conf) return { success: false, error: 'Provider not found' };

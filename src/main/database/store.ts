@@ -60,7 +60,17 @@ const DEFAULT_SETTINGS: AppSettings = {
   // Minimal by default; "ask" makes the agent ask the user per project.
   designStyle: 'minimal',
   askDesignBeforeUiWork: true,
-  projectMemoryEnabled: true
+  projectMemoryEnabled: true,
+  // Update detection is on by default; downloading and installing never are.
+  updateCheckEnabled: true,
+  checkUpdatesOnLaunch: true,
+  updateCheckIntervalHours: 6,
+  lastUpdateCheckAt: 0,
+  lastNotifiedVersion: '',
+  skippedUpdateVersion: '',
+  catalogCheckEnabled: true,
+  catalogCheckIntervalHours: 24,
+  lastCatalogCheckAt: 0
 };
 
 /** Masked display value for a stored key — never the key itself (spec §29). */

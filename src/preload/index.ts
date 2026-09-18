@@ -195,11 +195,24 @@ export const electronAPI = {
   checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATE_CHECK),
   downloadUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATE_DOWNLOAD),
   installUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATE_INSTALL),
+  skipUpdateVersion: (version: string) => ipcRenderer.invoke(IPC_CHANNELS.UPDATE_SKIP, version),
   getUpdateStatus: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATE_STATUS),
   onUpdateStatus: (callback: (status: any) => void) => {
     const handler = (_event: any, status: any) => callback(status);
     ipcRenderer.on(IPC_CHANNELS.UPDATE_STATUS, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.UPDATE_STATUS, handler);
+  },
+
+  // Model catalogue: check stages what providers report, apply is a click
+  getCatalogStatus: () => ipcRenderer.invoke(IPC_CHANNELS.CATALOG_STATUS),
+  checkCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.CATALOG_CHECK),
+  applyCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.CATALOG_APPLY),
+  discardCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.CATALOG_DISCARD),
+  undoCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.CATALOG_UNDO),
+  onCatalogStatus: (callback: (status: any) => void) => {
+    const handler = (_event: any, status: any) => callback(status);
+    ipcRenderer.on(IPC_CHANNELS.CATALOG_STATUS, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.CATALOG_STATUS, handler);
   },
 
   // Storage diagnostics

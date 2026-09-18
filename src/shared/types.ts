@@ -499,6 +499,27 @@ export interface AppSettings {
   /** Remember what the project is, in the project itself, across sessions. */
   projectMemoryEnabled: boolean;
 
+  // --------------------------------------------------------------- updates
+  /**
+   * These decide when D4IDE *looks* for a newer build. Nothing here can make it
+   * download or install one: that is always a click, and there is deliberately
+   * no setting that changes that.
+   */
+  updateCheckEnabled: boolean;
+  /** Check shortly after launch, in addition to the recurring interval. */
+  checkUpdatesOnLaunch: boolean;
+  updateCheckIntervalHours: number;
+  /** Epoch ms of the last completed check, so the interval survives a restart. */
+  lastUpdateCheckAt: number;
+  /** Version already announced, so the same build is not announced twice. */
+  lastNotifiedVersion: string;
+  /** Version the user skipped — silence until something newer shows up. */
+  skippedUpdateVersion: string;
+  /** Provider model lists and prices, on the same "look, never apply" rule. */
+  catalogCheckEnabled: boolean;
+  catalogCheckIntervalHours: number;
+  lastCatalogCheckAt: number;
+
   // ------------------------------------------------------------- sign-in
   /** The whole app is locked behind GitHub or Google sign-in (spec §7). */
   requireLogin: boolean;
@@ -573,6 +594,52 @@ export interface UpdateStatus {
   percent?: number;
   error?: string;
   checkedAt?: number;
+  /** Release date reported by the feed, shown next to the version. */
+  releasedAt?: string;
+}
+
+/** Everything the updater can be in, named once so switches can match on it. */
+export type UpdateState = UpdateStatus['state'];
+
+/**
+ * The model catalogue: what the providers report, staged before it is applied.
+ *
+ * These live here rather than next to the service because the renderer has to
+ * describe them to the user — "3 new models, 5 price changes" — and a renderer
+ * that imported a main-process module for the type would be reaching across the
+ * process boundary for words.
+ */
+export interface ModelChange {
+  id: string;
+  name: string;
+  /** Human-readable field names that would change. */
+  fields: string[];
+}
+
+export interface ProviderCatalogChange {
+  providerId: string;
+  providerName: string;
+  added: ModelChange[];
+  changed: ModelChange[];
+  /** Configured models this provider no longer lists. Kept, never deleted. */
+  missingUpstream: string[];
+}
+
+export interface CatalogDiff {
+  checkedAt: number;
+  providers: ProviderCatalogChange[];
+  totals: { providers: number; added: number; changed: number; kept: number; failed: number };
+  /** Providers that could not be asked, with why. */
+  failures: { providerId: string; error: string }[];
+}
+
+export interface CatalogStatus {
+  state: 'idle' | 'checking' | 'changes' | 'error';
+  diff?: CatalogDiff;
+  error?: string;
+  checkedAt?: number;
+  /** A snapshot of the models replaced by the last apply is restorable. */
+  undoAvailable: boolean;
 }
 
 export interface ContextItem {
