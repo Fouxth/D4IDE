@@ -6,3 +6,10 @@ release/
 *.log
 .env
 .env.*
+
+# Agent scratch: verification harnesses, screenshots and temp data. The scripts
+# reference absolute paths on one machine and the screenshots capture whatever
+# project the agent was inspecting, so neither belongs in the repository.
+.freebuff/
+
+*.tsbuildinfo
