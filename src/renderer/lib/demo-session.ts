@@ -134,7 +134,8 @@ function buildTimeline(): AgentTimelineItem[] {
     item('u2', {
       type: 'message',
       title: 'User Prompt',
-      content: 'ช่วยทำให้น่าใช้งาน และเอาให้เหมือน freebuff จริงๆ'
+      content:
+        '### สิ่งที่ต้องแก้\n\n| จุดที่พบ | อาการ | โฟกัส |\n| --- | --- | --- |\n| ฟอร์มชำระเงิน | step ไม่รับยอดจริง | `PaymentSteps.tsx` |\n| favicon | **404** ทุกหน้า | `index.html` |\n\nแก้ให้ครบทั้งสามจุด และทำ responsive 360px ด้วยครับ — ดูรายละเอียดที่ `docs/brief.md`'
     }),
     item('t4', {
       type: 'thinking',

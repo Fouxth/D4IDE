@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { TaskQueueItem, AgentMode } from '../../shared/types';
+import { TaskQueueItem, AgentMode, PromptImage } from '../../shared/types';
 import { useAgentStore } from './agentStore';
 
 /**
@@ -14,7 +14,7 @@ interface QueueState {
   items: TaskQueueItem[];
   /** True while the queue is allowed to advance automatically. */
   autoRun: boolean;
-  addItem: (prompt: string, mode: AgentMode) => TaskQueueItem;
+  addItem: (prompt: string, mode: AgentMode, images?: PromptImage[]) => TaskQueueItem;
   removeItem: (id: string) => void;
   updateItem: (id: string, patch: Partial<TaskQueueItem>) => void;
   reorderItems: (startIndex: number, endIndex: number) => void;
@@ -34,11 +34,12 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   items: [],
   autoRun: true,
 
-  addItem: (prompt, mode) => {
+  addItem: (prompt, mode, images) => {
     const item: TaskQueueItem = {
       id: `queue_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
       prompt,
       mode,
+      ...(images && images.length > 0 ? { images } : {}),
       status: 'queued',
       createdAt: Date.now()
     };
@@ -120,7 +121,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       )
     }));
     useAgentStore.getState().setMode(item.mode);
-    void useAgentStore.getState().startAgent(item.prompt);
+    void useAgentStore.getState().startAgent(item.prompt, item.images);
   },
 
   runNext: () => {
@@ -135,7 +136,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     }));
 
     useAgentStore.getState().setMode(nextItem.mode);
-    void useAgentStore.getState().startAgent(nextItem.prompt);
+    void useAgentStore.getState().startAgent(nextItem.prompt, nextItem.images);
   },
 
   settleRunning: (status) =>

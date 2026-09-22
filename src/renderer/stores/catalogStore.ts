@@ -27,7 +27,11 @@ interface CatalogState {
 const announced = new Set<number>();
 
 export const useCatalogStore = create<CatalogState>((set, get) => {
-  const receive = (status: CatalogStatus) => {
+  const receive = (status: CatalogStatus | null | undefined) => {
+    // A bridge that answers nothing is not a catalogue state. Taking the store
+    // down to `null` here is what blanked the whole Updates screen — one missing
+    // reply is not worth a black window.
+    if (!status || typeof status.state !== 'string') return;
     set({ status });
     if (status.state !== 'changes' || !status.diff) return;
     if (announced.has(status.diff.checkedAt)) return;

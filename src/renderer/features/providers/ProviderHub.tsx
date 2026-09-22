@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   AlertCircle,
+  AlertTriangle,
   Loader2,
   Plus,
   Trash2,
@@ -20,9 +21,10 @@ import {
   Power
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import i18n from '../../lib/i18n';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
-import { ModelInfo, ProviderConfig, ProviderTestResult } from '../../../shared/types';
+import { ModelInfo, ProviderConfig, ProviderTestAllResult, ProviderTestResult } from '../../../shared/types';
 import { VendorGroup, VendorModel, groupProviders } from '../../../shared/provider-vendors';
 import { formatPrice, providerErrorLabel } from '../../lib/format';
 import { AddProviderDialog } from './AddProviderDialog';
@@ -124,11 +126,20 @@ const VendorCard: React.FC<VendorCardProps> = ({ group, drafts, onDraftChange, o
       let latest: ProviderConfig[] = [];
       for (const provider of group.providers) {
         const draft = drafts[provider.id] ?? provider;
+        // Probe with the model the user actually talks through: the active one
+        // when this vendor serves it, else the first *enabled* model. The first
+        // row of the list at any price can be an opt-in or plan-gated id, and a
+        // test that fails on it reports a key problem that does not exist —
+        // which is exactly how a green key ended up wearing a red dot.
+        const activeModel = useSettingsStore.getState().settings?.activeModelId;
+        const probeModel =
+          provider.models.find((m) => m.id === activeModel)?.id ??
+          provider.models.find((m) => m.id !== undefined)?.id;
         const res = await window.electronAPI.testProvider(
           provider.id,
           keyInput.trim() || undefined,
           draft.baseUrl,
-          draft.models[0]?.id
+          probeModel
         );
         latest = res.providers;
         collected.push({ providerId: provider.id, protocol: provider.type, result: res.result });
@@ -318,6 +329,12 @@ const VendorCard: React.FC<VendorCardProps> = ({ group, drafts, onDraftChange, o
                   <span>{keyHolder.apiKeyPreview || '••••'}</span>
                 </span>
               )}
+              {group.keyUnreadable && (
+                <span className="text-[10px] text-red-400 flex items-center space-x-1">
+                  <AlertTriangle className="w-3 h-3" />
+                  <span>{t('providers.keyUnreadable')}</span>
+                </span>
+              )}
             </div>
             <div className="flex items-center space-x-1.5">
               <div className="relative flex-1">
@@ -326,6 +343,7 @@ const VendorCard: React.FC<VendorCardProps> = ({ group, drafts, onDraftChange, o
                   value={keyInput}
                   onChange={(e) => setKeyInput(e.target.value)}
                   placeholder={keyHolder.hasApiKey ? t('providers.replaceKeyPlaceholder') : 'sk-...'}
+                  aria-invalid={group.keyUnreadable || undefined}
                   className="w-full bg-d4-panel border border-d4-border rounded px-2.5 py-1.5 pr-8 text-xs text-d4-text outline-none font-mono focus:border-d4-accent"
                 />
                 <button
@@ -578,14 +596,41 @@ const VendorCard: React.FC<VendorCardProps> = ({ group, drafts, onDraftChange, o
   );
 };
 
-export const ProviderHub: React.FC = () => {
+export const ProviderHub: React.FC<{
+  /** Open with the preset list already showing — "connect a provider". */
+  initialAddOpen?: boolean;
+}> = ({ initialAddOpen = false }) => {
   const { t } = useTranslation();
   const { providers, settings, saveProviders, applyProviders } = useSettingsStore();
   const [drafts, setDrafts] = useState<Record<string, ProviderConfig>>({});
   const [filter, setFilter] = useState('');
-  const [isAddOpen, setIsAddOpen] = useState(false);
+  const [isAddOpen, setIsAddOpen] = useState(initialAddOpen);
   const [isSaving, setIsSaving] = useState(false);
   const [showUnused, setShowUnused] = useState(false);
+  /*
+   * One click, every provider, one honest table. The verdicts come from the
+   * same testConnection path the per-card button uses, so the table can never
+   * disagree with the cards below it — they are the same probe.
+   */
+  const [testAll, setTestAll] = useState<ProviderTestAllResult | null>(null);
+  const [testingAll, setTestingAll] = useState(false);
+
+  const handleTestAll = async () => {
+    if (!window.electronAPI?.testAllProviders || testingAll) return;
+    setTestingAll(true);
+    try {
+      const result = await window.electronAPI.testAllProviders();
+      setTestAll(result);
+      // A finished sweep is worth a headline, not silence — the table carries
+      // the detail, the toast only says the sweep is done.
+      if (result.failCount === 0) toast.success(t('providers.testAllDone', { ok: result.okCount }));
+      else toast.warning(t('providers.testAllMixed', { ok: result.okCount, fail: result.failCount }));
+    } catch {
+      toast.error(t('providers.testAllFailed'));
+    } finally {
+      setTestingAll(false);
+    }
+  };
 
   useEffect(() => {
     const next: Record<string, ProviderConfig> = {};
@@ -658,6 +703,14 @@ export const ProviderHub: React.FC = () => {
             className="w-40 bg-d4-panel border border-d4-border rounded px-2 py-1 text-[11px] text-d4-text outline-none focus:border-d4-accent"
           />
           <button
+            onClick={() => void handleTestAll()}
+            disabled={testingAll}
+            className="flex items-center space-x-1 px-2.5 py-1 bg-d4-surface border border-d4-border hover:bg-d4-subtle text-d4-text rounded text-[11px] disabled:opacity-40"
+          >
+            {testingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+            <span>{t('providers.testAll')}</span>
+          </button>
+          <button
             onClick={() => setIsAddOpen(true)}
             className="flex items-center space-x-1 px-2.5 py-1 bg-d4-surface border border-d4-border hover:bg-d4-subtle text-d4-text rounded text-[11px]"
           >
@@ -674,6 +727,43 @@ export const ProviderHub: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* The sweep's verdicts, one row per vendor. Rendered above the cards so
+          the eye lands on "what works" before it lands on any single card. */}
+      {testAll && testAll.rows.length > 0 && (
+        <div className="border border-d4-border rounded-md overflow-hidden">
+          <div className="flex items-center justify-between px-3 py-1.5 bg-d4-panel border-b border-d4-border text-[11px]">
+            <span className="text-d4-muted">{t('providers.testAllTitle')}</span>
+            <span className="text-d4-dimmed">
+              {t('providers.testAllSummary', { ok: testAll.okCount, fail: testAll.failCount })}
+            </span>
+          </div>
+          <table className="w-full text-[11px]">
+            <tbody>
+              {testAll.rows.map((row) => (
+                <tr key={row.providerId} className="border-b border-d4-border-subtle last:border-0">
+                  <td className="px-3 py-1.5 flex items-center gap-1.5 whitespace-nowrap">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${row.success ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                    <span className="text-d4-text">{row.name}</span>
+                  </td>
+                  <td className="px-2 py-1.5 text-d4-dimmed font-mono whitespace-nowrap">
+                    {row.success
+                      ? `${row.latencyMs ?? 0}ms${row.modelCount ? ` · ${row.modelCount}` : ''}`
+                      : ''}
+                  </td>
+                  <td className="px-3 py-1.5 text-d4-dimmed min-w-0">
+                    {row.success ? (
+                      row.gatedModel ? t('providers.testGatedOk') : t('providers.testOk')
+                    ) : (
+                      <span className="text-red-400">{providerErrorLabel(row.errorKind, i18n.language === 'th' ? 'th' : 'en')}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="space-y-3">
         {shown.map((group) => (

@@ -4,6 +4,8 @@ import { IPC_CHANNELS } from '../shared/ipc-events';
 export const electronAPI = {
   // Window
   minimize: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_MINIMIZE),
+  beginWindowDrag: () => ipcRenderer.send(IPC_CHANNELS.WINDOW_DRAG_START),
+  endWindowDrag: () => ipcRenderer.send(IPC_CHANNELS.WINDOW_DRAG_END),
   maximize: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_MAXIMIZE),
   close: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_CLOSE),
 
@@ -14,6 +16,14 @@ export const electronAPI = {
   /** What database the project uses, read from the project's own files. */
   projectDatabase: (projectPath?: string) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_DATABASE, projectPath),
   getRecentProjects: () => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_RECENT_LIST),
+  /** The folders on the rail: kept until the user takes one off it. */
+  getSpaces: () => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SPACES_LIST),
+  forgetSpace: (projectPath: string) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SPACE_FORGET, projectPath),
+  /** Conversation starters built from the project's real state; [] when there is none. */
+  getProjectSuggestions: (projectPath: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SUGGESTIONS, projectPath) as Promise<
+      { id: string; label: string; prompt: string }[]
+    >,
 
   // Files
   readFile: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILE_READ, filePath),
@@ -66,6 +76,22 @@ export const electronAPI = {
   saveProviders: (providers: any) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDERS_SAVE, providers),
   testProvider: (providerId: string, apiKey?: string, baseUrl?: string, model?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.PROVIDERS_TEST, providerId, apiKey, baseUrl, model),
+  /** One verdict per vendor, ready to be shown as the summary table. */
+  testAllProviders: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.PROVIDERS_TEST_ALL) as Promise<
+      import('../shared/types').ProviderTestAllResult
+    >,
+  /** Ask for a health verdict on the active provider right now. */
+  probeProviderHealth: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_HEALTH_PROBE) as Promise<
+      import('../shared/types').ProviderHealthStatus
+    >,
+  /** Live health pushes from the periodic watch (also fired by probes). */
+  onProviderHealthStatus: (handler: (status: import('../shared/types').ProviderHealthStatus) => void) => {
+    const listener = (_event: unknown, status: import('../shared/types').ProviderHealthStatus) => handler(status);
+    ipcRenderer.on(IPC_CHANNELS.PROVIDER_HEALTH_STATUS, listener);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.PROVIDER_HEALTH_STATUS, listener);
+  },
   refreshProviderModels: (providerId: string) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDERS_REFRESH_MODELS, providerId),
   setProviderKey: (providerId: string, apiKey: string | null) =>
     ipcRenderer.invoke(IPC_CHANNELS.PROVIDERS_SET_KEY, providerId, apiKey),
@@ -117,6 +143,7 @@ export const electronAPI = {
 
   planStepDecision: (decision: 'continue' | 'runAll' | 'stop') =>
     ipcRenderer.invoke(IPC_CHANNELS.AGENT_PLAN_STEP, decision),
+  answerQuestions: (answer: any) => ipcRenderer.invoke(IPC_CHANNELS.AGENT_ANSWER_QUESTIONS, answer),
   resolveApproval: (id: string, decision: 'approved' | 'approved_for_session' | 'rejected', toolName?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.AGENT_APPROVAL_RESOLVE, id, decision, toolName),
   getAgentSessionState: () => ipcRenderer.invoke(IPC_CHANNELS.AGENT_SESSION_STATE),
@@ -147,6 +174,25 @@ export const electronAPI = {
   saveSkill: (skill: any, projectPath?: string) => ipcRenderer.invoke(IPC_CHANNELS.SKILLS_SAVE, skill, projectPath),
   deleteSkill: (skillId: string, projectPath?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.SKILLS_DELETE, skillId, projectPath),
+  // Rules: the standing laws are read straight from `shared/rules`; these two
+  // calls only carry the user's own files.
+  getRules: (projectPath?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.RULES_GET, projectPath) as Promise<{
+      global: string;
+      project: string;
+      globalPath: string;
+      projectFile: string;
+    }>,
+  saveRules: (scope: 'global' | 'project', content: string, projectPath?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.RULES_SAVE, scope, content, projectPath) as Promise<{
+      success: boolean;
+      path?: string;
+      scope?: 'global' | 'project';
+      error?: string;
+    }>,
+  revealRules: (scope: 'global' | 'project', projectPath?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.RULES_REVEAL, scope, projectPath) as Promise<{ success: boolean; error?: string }>,
+
   listMcp: (projectPath?: string) => ipcRenderer.invoke(IPC_CHANNELS.MCP_LIST, projectPath),
   startMcp: (config: any, cwd?: string) => ipcRenderer.invoke(IPC_CHANNELS.MCP_START, config, cwd),
   stopMcp: (serverId: string) => ipcRenderer.invoke(IPC_CHANNELS.MCP_STOP, serverId),
@@ -159,6 +205,34 @@ export const electronAPI = {
   // Preview
   capturePreview: () => ipcRenderer.invoke(IPC_CHANNELS.PREVIEW_CAPTURE),
   detectPreviewUrls: (projectPath?: string) => ipcRenderer.invoke(IPC_CHANNELS.PREVIEW_DETECT, projectPath),
+  /**
+   * The command a typed line should become, so a dev server started by hand
+   * serves from this project's own port instead of whatever the tool defaults to.
+   * Null when the line is not a dev command or there is no project.
+   */
+  planTerminalCommand: (command: string, projectPath?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PREVIEW_PLAN, command, projectPath) as Promise<{
+      command: string;
+      port: number | null;
+      kind: 'client' | 'server';
+      strategy: 'flag' | 'env' | 'none';
+    } | null>,
+  launchPreview: (projectPath?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PREVIEW_LAUNCH, projectPath) as Promise<{
+      started: boolean;
+      command?: string;
+      script?: string;
+      packageManager?: string;
+      /** The port the app chose, and the address it belongs to, when it chose one. */
+      port?: number | null;
+      url?: string | null;
+      error?: string;
+      /**
+       * This project's server was already up, so nothing was started: the panel
+       * points at `url` instead of spawning a twin that would fight it.
+       */
+      alreadyRunning?: boolean;
+    }>,
 
   // Mission (session-scoped context)
   getMission: (sessionId: string) => ipcRenderer.invoke(IPC_CHANNELS.MISSION_GET, sessionId),
@@ -179,7 +253,7 @@ export const electronAPI = {
   openLogDirectory: () => ipcRenderer.invoke(IPC_CHANNELS.LOGS_OPEN_DIR),
 
   // Desktop notifications
-  notify: (request: { title: string; body?: string; kind?: string }) =>
+  notify: (request: { title: string; body?: string; kind?: string; silent?: boolean }) =>
     ipcRenderer.invoke(IPC_CHANNELS.APP_NOTIFY, request),
 
   // Unsaved buffers (crash recovery)

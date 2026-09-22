@@ -26,6 +26,8 @@ module.exports = {
           accent: 'rgb(var(--d4-accent) / <alpha-value>)',
           'accent-hover': 'rgb(var(--d4-accent-hover) / <alpha-value>)',
           'accent-subtle': 'rgb(var(--d4-accent) / 0.15)',
+          bubble: 'rgb(var(--d4-bubble) / <alpha-value>)',
+          'bubble-text': 'rgb(var(--d4-bubble-text) / <alpha-value>)',
           success: 'rgb(var(--d4-success) / <alpha-value>)',
           warning: 'rgb(var(--d4-warning) / <alpha-value>)',
           error: 'rgb(var(--d4-error) / <alpha-value>)',

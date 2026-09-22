@@ -23,13 +23,22 @@ interface UpdateState {
   /** A user-triggered action is in flight (check/download/install). */
   busy: boolean;
   started: boolean;
-  /** Version whose banner the user closed for now — not the same as skipping. */
+  /** Version whose card the user closed for now — not the same as skipping. */
   dismissedVersion: string;
+  /** The user picked "update and restart", so the restart happens on completion. */
+  autoInstall: boolean;
+  /**
+   * The last download was the user's own attempt. Only a failure of an attempt
+   * earns a card: background checks fail on trains and are not news.
+   */
+  attempted: boolean;
 
   start: () => void;
   refresh: () => Promise<void>;
   check: () => Promise<void>;
   download: () => Promise<void>;
+  /** Download now, install and restart the moment it lands. */
+  updateAndRestart: () => Promise<void>;
   install: () => Promise<void>;
   skipVersion: (version: string) => Promise<void>;
   dismiss: (version: string) => void;
@@ -61,9 +70,27 @@ export const useUpdateStore = create<UpdateState>((set, get) => {
     }
   };
 
-  const apply = (status: UpdateStatus) => {
+  const apply = (status: UpdateStatus | null | undefined) => {
+    // Same rule as the catalogue: an empty answer must not replace a real one,
+    // because every screen that shows the status then reads `state`.
+    if (!status || typeof status.state !== 'string') return;
     set({ status });
     void announce(status);
+
+    // "Update and restart" is one decision, not two: the second click is the one
+    // the user already made. An install the main process refuses (an agent run is
+    // in flight) comes back as an error on the same status, so the flag is
+    // cleared either way and the card goes back to asking.
+    if (status.state === 'ready' && get().autoInstall) {
+      set({ autoInstall: false });
+      void get().install();
+      return;
+    }
+
+    // A failed download must not leave a restart armed for the next time an
+    // update happens to land.
+    if (status.state === 'error' && get().autoInstall) set({ autoInstall: false });
+    if (status.state === 'idle') set({ attempted: false });
   };
 
   return {
@@ -71,6 +98,8 @@ export const useUpdateStore = create<UpdateState>((set, get) => {
     busy: false,
     started: false,
     dismissedVersion: '',
+    autoInstall: false,
+    attempted: false,
 
     /**
      * Subscribe to the main process. Guarded rather than cleaned up: the store
@@ -103,12 +132,25 @@ export const useUpdateStore = create<UpdateState>((set, get) => {
     /** Step one of the manual flow — the user asked for exactly this. */
     download: async () => {
       if (!window.electronAPI) return;
-      set({ busy: true });
+      set({ busy: true, attempted: true });
       try {
         apply(await window.electronAPI.downloadUpdate());
       } finally {
         set({ busy: false });
       }
+    },
+
+    /**
+     * One click, two acts: download, then restart into the new build.
+     *
+     * The restart is still the user's decision — this function is only reachable
+     * from their click — and the flag is dropped if anything refuses it, so a
+     * blocked install never leaves a restart waiting in the background.
+     */
+    updateAndRestart: async () => {
+      if (!window.electronAPI) return;
+      set({ autoInstall: true, attempted: true });
+      await get().download();
     },
 
     /** Step two. Main refuses while an agent run is in flight, and says so. */

@@ -200,6 +200,36 @@ export const isDesignStyle = (value: unknown): value is DesignStyle =>
   typeof value === 'string' && (DESIGN_STYLE_IDS as string[]).includes(value);
 
 /**
+ * Rules that stop UI work from reading as generated-by-default.
+ *
+ * These are the tells users actually notice: a purple-blue gradient hero,
+ * every card in the same radius, emoji used as icons, glass blur over
+ * everything. They apply on top of every profile, because slop is not a
+ * style — it is the absence of decisions.
+ */
+export const ANTI_AI_SLOP_RULES_TH: string[] = [
+  'ห้ามใช้เกรเดียนต์ม่วง-น้ำเงิน หรือเกรเดียนต์เด่น ๆ ทั้งหน้า เว้นแต่สไตล์ที่เลือกกำหนดไว้ชัดเจน',
+  'ห้ามใช้อีโมจิแทนไอคอน — ใช้ไอคอนจากชุดเดียวที่โปรเจกต์มีอยู่ และขนาดน้ำหนักต้องตรงกันทั้งหน้า',
+  'ห้ามใส่ glassmorphism / backdrop-blur กับทุกการ์ด เลือกใส่เฉพาะจุดที่มีเหตุผลเชิงชั้นข้อมูล',
+  'ห้ามทำทุกการ์ดเหมือนกันหมด — ลำดับความสำคัญต้องเห็นจากขนาด น้ำหนัก และพื้นที่ว่าง ไม่ใช่กล่องเรียงแถว',
+  'ห้ามใช้ฟอนต์ Inter/Roboto เป็นตัวเอก ถ้าโปรไฟล์กำหนดฟอนต์อื่น — หัวข้อต้องมีบุคลิกตามโปรไฟล์',
+  'ห้ามเขียนข้อความ placeholder ลอย ๆ อย่าง "Lorem" หรือประโยคการตลาดกลวง ใช้เนื้อหาจริงหรือข้อความจำลองที่มีความหมายกับโดเมน',
+  'ห้ามเติมตกแต่งที่ไม่ทำหน้าที่ (แถบสีลอย, blob, จุดกริดประ) — ทุกองค์ประกอบต้องมีเหตุผลด้านการใช้งาน',
+  'ก่อนเขียน ให้อ่านโค้ดหน้าเป้าหมายก่อนเสมอ แล้วต่อยอดระบบที่โปรเจกต์มีอยู่ ไม่ใช่ทับด้วยเทมเพลตใหม่'
+];
+
+export const ANTI_AI_SLOP_RULES_EN: string[] = [
+  'No purple-blue gradients or a dominant full-page gradient unless the chosen profile defines one',
+  'Never use emoji as icons — use the icon set the project already has, at one size and weight across the page',
+  'Do not put glassmorphism / backdrop-blur on every card; reserve it for places with a real layering reason',
+  'Do not make every card identical — hierarchy must come from size, weight and whitespace, not rows of equal boxes',
+  'Do not make Inter/Roboto the identity font when the profile specifies another — headings must carry the profile character',
+  'No floating placeholder copy like Lorem or empty marketing filler; use real content or domain-meaningful sample data',
+  'No decoration that does no work (floating colour bars, blobs, dotted grids) — every element earns its place',
+  'Before writing, read the target page code and extend the system the project already has instead of overwriting it with a fresh template'
+];
+
+/**
  * Builds the block that goes into the request for UI work.
  *
  * Written as constraints an implementation can be checked against, because that
@@ -224,6 +254,9 @@ export function buildDesignBrief(style: Exclude<DesignStyle, 'ask'>, language: '
     `${th ? 'ขนาดตัวอักษร' : 'Type scale'}: display ${profile.type.display} · h1 ${profile.type.h1} · h2 ${profile.type.h2} · body ${profile.type.body} · small ${profile.type.small}`,
     th ? 'กฎที่ต้องทำตาม:' : 'Rules that must hold:',
     ...profile.rules.map((rule, index) => `${index + 1}. ${rule}`),
+    '',
+    th ? 'ข้อห้ามกันหน้าตาแบบงาน AI (ตรวจได้ทุกข้อ):' : 'Anti-generated-look bans (each one checkable):',
+    ...(th ? ANTI_AI_SLOP_RULES_TH : ANTI_AI_SLOP_RULES_EN).map((rule, index) => `${th ? 'ห้าม' : 'Ban'} ${index + 1}: ${rule}`),
     '',
     th
       ? 'โทเคนที่ต้องใช้จริง (คัดลอกลงไฟล์ธีมของโปรเจกต์ แล้วอ้างอิงผ่านชื่อตัวแปรเท่านั้น):'

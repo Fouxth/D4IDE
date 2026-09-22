@@ -32,11 +32,15 @@ export const MAX_TABS = 8;
  * - The live session is never dropped and never moved: if it is already on the
  *   strip it stays where it is, and if it is not (a brand new session, or one
  *   resumed from Settings) it is appended.
+ * - With no live session the strip is just the stored ones. There is no
+ *   placeholder standing for "a session that does not exist yet": a strip with
+ *   nothing open is genuinely empty, and the conversation appears the moment the
+ *   first prompt gives it an id.
  */
 export function buildStrip(
   stored: StripTab[],
   order: string[],
-  live: StripTab,
+  live?: StripTab | null,
   max: number = MAX_TABS
 ): StripTab[] {
   const byAge = [...stored].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
@@ -55,6 +59,7 @@ export function buildStrip(
     })
     .map((entry) => entry.tab);
 
+  if (!live) return strip;
   if (strip.some((tab) => tab.id === live.id)) return strip;
   return [...strip, live];
 }

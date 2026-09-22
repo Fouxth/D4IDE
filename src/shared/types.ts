@@ -1,7 +1,9 @@
 // Shared types between Main, Preload, and Renderer processes
 
 export type { DesignStyle } from './design-profiles';
+export type { ThemeId } from './theme';
 import type { DesignStyle } from './design-profiles';
+import type { ThemeId } from './theme';
 
 export type PermissionMode = 'safe' | 'ask' | 'full';
 
@@ -10,6 +12,9 @@ export type WorkspaceMode = 'agent' | 'code';
 export type AgentMode = 'plan' | 'build';
 
 export type AgentStatus = 'idle' | 'planning' | 'waiting_approval' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled';
+
+/** Sounds a desktop notification can carry (see `AppSettings.notificationSound`). */
+export type NotificationSound = 'system' | 'chime' | 'ping' | 'pop' | 'none';
 
 export interface ModelInfo {
   id: string;
@@ -76,6 +81,13 @@ export interface ProviderConfig {
   hasApiKey?: boolean;
   /** Sanitized masked preview, e.g. "••••1a2b". */
   apiKeyPreview?: string;
+  /**
+   * Sanitized flag: a key *is* on file for this provider but it cannot be
+   * decrypted any more — the OS keychain that protected it has changed since.
+   * Not the same as "no key": the user must paste it again, and until then no
+   * request can be authorized, so the provider stays out of routing.
+   */
+  keyUnreadable?: boolean;
   status?: ProviderStatus;
   lastTestedAt?: number;
   lastError?: string;
@@ -89,6 +101,46 @@ export interface ProviderTestResult {
   errorKind?: ProviderErrorKind;
   latencyMs?: number;
   modelCount?: number;
+}
+
+/** One vendor's row in the "test every provider" summary (spec §30). */
+export interface ProviderTestAllRow {
+  providerId: string;
+  name: string;
+  protocols: string[];
+  success: boolean;
+  /** True when the key is fine but the probed model is gated off the plan. */
+  gatedModel?: boolean;
+  latencyMs?: number;
+  modelCount?: number;
+  error?: string;
+  errorKind?: ProviderErrorKind;
+}
+
+export interface ProviderTestAllResult {
+  rows: ProviderTestAllRow[];
+  okCount: number;
+  failCount: number;
+  testedAt: number;
+}
+
+/**
+ * What the periodic health watch last learned about the provider the user is
+ * talking to. Pushed to the renderer whenever a probe finishes, so a provider
+ * that dies between tests is named in the UI before the next prompt fails.
+ */
+export interface ProviderHealthStatus {
+  /** `unknown` — nothing probed yet, auto routing, or no active provider. */
+  state: 'ok' | 'down' | 'unknown';
+  providerId?: string;
+  providerName?: string;
+  errorKind?: ProviderErrorKind;
+  error?: string;
+  checkedAt?: number;
+  /** A fallback that *answered its own probe*, offered only when `down`. */
+  fallbackProviderId?: string;
+  fallbackProviderName?: string;
+  fallbackModelId?: string;
 }
 
 export type ProviderErrorKind =
@@ -144,6 +196,7 @@ export interface AgentTimelineItem {
     | 'tool_result'
     | 'plan'
     | 'design'
+    | 'question'
     | 'message'
     | 'error'
     | 'summary'
@@ -183,6 +236,58 @@ export interface PlanData {
 export type PlanScope = 'full' | 'step' | 'first';
 
 /**
+ * A question the agent raises mid-run, with the answers already laid out.
+ *
+ * "What do you want?" wastes the one turn the user is willing to spend; a
+ * question with concrete options can be answered in one click, and in Plan Mode
+ * it is the difference between a plan for the right thing and a plan for a
+ * guess. Options are bounded (see `shared/questions.ts`) so a model cannot turn
+ * the card into a wall of prose.
+ */
+export interface QuestionOption {
+  /** The answer itself, shown on the button. */
+  label: string;
+  /** One line explaining what choosing it means. */
+  description?: string;
+  /** The AI's recommendation, with a one-line why, so the user can decide fast. */
+  recommended?: boolean;
+  /** Why this option is recommended (shown under the recommendation badge). */
+  reason?: string;
+}
+
+export interface AgentQuestion {
+  /** Two or three words naming the topic, e.g. "ฐานข้อมูล". */
+  header?: string;
+  question: string;
+  options: QuestionOption[];
+  /** Several options may be true at once. */
+  multiSelect?: boolean;
+  /** The user may answer in their own words (always available when there are no options). */
+  allowFreeText?: boolean;
+  /**
+   * The AI's suggested answer when no single option is marked, or a one-line
+   * note on why it leans where it leans. Empty when the AI has no opinion.
+   */
+  aiSuggestion?: string;
+}
+
+/** One question's answer, as the user chose it. */
+export interface QuestionAnswerEntry {
+  question: string;
+  /** Labels of the options the user picked, in the order asked. */
+  selected: string[];
+  /** Anything the user typed instead of, or in addition to, the options. */
+  note?: string;
+}
+
+/** What the user did with a question card. */
+export interface QuestionAnswer {
+  answers: QuestionAnswerEntry[];
+  /** True when the card was dismissed without answering. */
+  skipped?: boolean;
+}
+
+/**
  * The style chooser the agent raises before it writes any UI.
  *
  * "Make it beautiful" is not a specification, and the user should not have to
@@ -214,6 +319,12 @@ export interface TaskQueueItem {
   id: string;
   prompt: string;
   mode: AgentMode;
+  /**
+   * Images that were attached when the message was queued. A queued message is
+   * still a message: dropping its pictures on the way into the queue would send
+   * the words and silently lose the screenshot they referred to.
+   */
+  images?: PromptImage[];
   status: 'queued' | 'planning' | 'waiting_approval' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled';
   createdAt: number;
   startedAt?: number;
@@ -265,6 +376,14 @@ export interface UsageRecord {
   status: 'completed' | 'failed' | 'cancelled' | 'partial';
   durationMs?: number;
   timestamp: number;
+  /**
+   * What that one request finished: files changed, validations that really ran,
+   * tokens spent. Kept on the usage row instead of in the transcript because it
+   * is a report about the run, and the run's report belongs with its cost.
+   */
+  summary?: string;
+  /** The user's request this summary reports on, so a list of them is readable. */
+  summaryRequest?: string;
 }
 
 export interface UsageAggregate {
@@ -281,20 +400,15 @@ export interface UsageBucket extends UsageAggregate {
   label: string;
 }
 
-export interface BudgetStatus {
-  perRequest: number;
-  daily: number;
-  monthly: number;
-  warnThreshold: number;
-  hardStop: boolean;
-  dailySpent: number;
-  monthlySpent: number;
-  dailyPct: number;
-  monthlyPct: number;
-  warn: boolean;
-  exceeded: boolean;
-}
-
+/**
+ * What has been spent, and nothing else.
+ *
+ * There are no limits in here on purpose. The app used to carry a spending
+ * budget — daily, monthly and per-request caps, a hard stop and an automatic
+ * thrift switch — which meant the engine could refuse to keep working on a
+ * number the user had typed months earlier. Usage is a report now: it says what
+ * a run cost, and the user decides what to do about it.
+ */
 export interface UsageSummary {
   session: UsageAggregate;
   today: UsageAggregate;
@@ -304,7 +418,6 @@ export interface UsageSummary {
   byModel: UsageBucket[];
   byProject: UsageBucket[];
   recent: UsageRecord[];
-  budget: BudgetStatus;
 }
 
 export interface ToolAuditEntry {
@@ -434,7 +547,7 @@ export interface SessionTranscript {
 
 export interface AppSettings {
   language: 'th' | 'en';
-  theme: 'd4-dark' | 'd4-light';
+  theme: ThemeId;
   fontSize: number;
   permissionMode: PermissionMode;
   defaultMode: AgentMode;
@@ -445,17 +558,6 @@ export interface AppSettings {
   activeModelId: string;
   routingProfile: 'quality' | 'balanced' | 'cost' | 'fast';
   reasoningEffort: 'off' | 'low' | 'medium' | 'high' | 'auto';
-  dailyBudget: number;
-  monthlyBudget: number;
-  perRequestBudget: number;
-  budgetHardStop: boolean;
-  /**
-   * Engage the cheaper limits automatically once spending passes the warning
-   * threshold. Warning alone never reduced a bill; this is what protects the
-   * budget the user set (spec §36/§39).
-   */
-  autoThriftOnBudget: boolean;
-  budgetWarnThreshold: number;
   /**
    * Token economy. These are engine settings, not prompt wording: `/thrift`
    * flips `thriftMode` and the runtime changes what it actually sends.
@@ -476,6 +578,17 @@ export interface AppSettings {
   checkpointFrequency: 'off' | 'task' | 'write';
   favoriteModels: string[];
   recentModels: string[];
+  /**
+   * The folders that stay on the rail, most recently opened first.
+   *
+   * Deliberately *not* the same list as `recentProjects`. Recents is a shortcut
+   * list that ages out on its own (newest ten, so the picker stays short), while
+   * a space is furniture: it sits on the rail until the user takes it off, and
+   * switching back to one must never require finding the folder again. The two
+   * are written together when a folder is opened, and removing a space leaves
+   * the recents list alone.
+   */
+  spaces: string[];
   recentProjects: string[];
   /**
    * The order the user dragged the session strip into (session ids).
@@ -485,6 +598,23 @@ export interface AppSettings {
    * contents changed still lands somewhere sensible.
    */
   sessionOrder: string[];
+  /**
+   * Sessions the user closed from the strip.
+   *
+   * Persisted for the same reason the order is: a closed tab that comes back on
+   * the next launch is not closed, and every session in the database 
+   * reappearing at once made opening a project look like it had undone the
+   * tidying. Selecting a session anywhere removes its id from this list.
+   */
+  closedSessionIds?: string[];
+  /**
+   * Whether local runtimes (Ollama, LM Studio) appear in the model picker.
+   *
+   * Off by default: they need no API key, so "the runtime answered on this
+   * machine" was being treated as "the user wants this listed", and a user who
+   * uses neither still got both cards. Turning it on discovers their models.
+   */
+  localProvidersEnabled?: boolean;
   firstRunComplete: boolean;
   /** Built-in providers the user removed — they must not come back on restart. */
   removedProviderIds: string[];
@@ -492,6 +622,25 @@ export interface AppSettings {
   logLevel: LogLevel;
   /** OS notifications when the window is not focused (spec §53). */
   desktopNotifications: boolean;
+  /**
+   * Sound played alongside a desktop notification.
+   *
+   * `system` leaves the sound to Windows, the rest are short tones D4IDE plays
+   * itself (so the choice exists on every platform and needs no asset files),
+   * and `none` is silence.
+   */
+  notificationSound: NotificationSound;
+  /**
+   * Standing laws the user switched off on purpose.
+   *
+   * Every law in `STANDING_LAWS` is enforced by the engine, not just written in
+   * a prompt — which is the point, and also why a few people legitimately need
+   * to turn one off (a monorepo whose sibling folders belong to the same
+   * project, a scaffold step that starts from an empty folder). Off means the
+   * engine stops enforcing it *and* the model stops being told it, so the UI and
+   * the prompt can never disagree.
+   */
+  disabledLaws: string[];
   /** Visual direction D4IDE applies to UI work; "ask" makes the agent ask first. */
   designStyle: DesignStyle;
   /** Ask before writing UI when the project has no style chosen yet. */
@@ -519,6 +668,12 @@ export interface AppSettings {
   catalogCheckEnabled: boolean;
   catalogCheckIntervalHours: number;
   lastCatalogCheckAt: number;
+  /**
+   * The periodic watch on the provider being talked to. The failure it finds is
+   * shown as a banner over the chat the moment the probe lands, not here.
+   */
+  providerHealthCheckEnabled: boolean;
+  providerHealthCheckIntervalMinutes: number;
 
   // ------------------------------------------------------------- sign-in
   /** The whole app is locked behind GitHub or Google sign-in (spec §7). */
@@ -690,6 +845,16 @@ export interface GitStatusSummary {
   staged: string[];
   unstaged: string[];
   untracked: string[];
+  /**
+   * False when the folder is not a git working tree at all.
+   *
+   * The status bar used to print a branch cell unconditionally and fell back to
+   * an em dash, so every non-git folder carried a dead "—" in the corner. Absent
+   * on older payloads; treat that as "unknown, keep showing what we have".
+   */
+  isRepo?: boolean;
+  /** `origin`'s URL, when the repository has one. No remote, nothing to sync. */
+  remote?: string | null;
 }
 
 /**

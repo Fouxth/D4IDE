@@ -21,6 +21,7 @@ export type Node =
   | { kind: 'message'; item: AgentTimelineItem }
   | { kind: 'plan'; item: AgentTimelineItem }
   | { kind: 'design'; item: AgentTimelineItem }
+  | { kind: 'question'; item: AgentTimelineItem }
   | { kind: 'summary'; item: AgentTimelineItem }
   | { kind: 'error'; item: AgentTimelineItem }
   | { kind: 'subagent'; item: AgentTimelineItem }
@@ -66,6 +67,7 @@ export function buildNodes(timeline: AgentTimelineItem[]): Node[] {
     flush();
     if (item.type === 'plan') nodes.push({ kind: 'plan', item });
     else if (item.type === 'design') nodes.push({ kind: 'design', item });
+    else if (item.type === 'question') nodes.push({ kind: 'question', item });
     else if (item.type === 'summary') nodes.push({ kind: 'summary', item });
     else if (item.type === 'error') nodes.push({ kind: 'error', item });
     else if (item.type === 'subagent') nodes.push({ kind: 'subagent', item });

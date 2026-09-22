@@ -308,7 +308,9 @@ describe('provider store — API key hygiene (spec §29)', () => {
     providerManager.reloadProviders();
     expect(providerManager.getUsableProviders().some((p) => p.id === PROVIDER_ID)).toBe(true);
 
-    appStore.saveProviders(appStore.getProviders().map((p) => (p.id === PROVIDER_ID ? { ...p, apiKey: '' } : p)));
+    // Removal is an explicit act: an empty `apiKey` on save means "I did not
+    // touch this key", which is what keeps an undecryptable read from wiping it.
+    appStore.setProviderKey(PROVIDER_ID, null);
     providerManager.reloadProviders();
     expect(providerManager.getUsableProviders().some((p) => p.id === PROVIDER_ID)).toBe(false);
   });

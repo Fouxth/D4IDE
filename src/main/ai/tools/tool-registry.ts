@@ -8,9 +8,29 @@ import { mcpClient, McpToolInfo } from '../../mcp/mcp-client';
 import { browserService } from '../../browser/browser-service';
 import { subagentRoleNames } from '../agent/subagents';
 import { previewRegistry } from '../../preview/preview-registry';
+import { planDevServerLaunch, scriptBodyFor } from '../../preview/dev-server';
 import { ToolCall, ToolResult, FileChange, Checkpoint } from '../../../shared/types';
 
 const SUBAGENT_ROLES = subagentRoleNames();
+
+/**
+ * The answer a background command gets once it is running.
+ *
+ * The port is deliberately part of it: an agent that started a server knows
+ * where to look, instead of probing whatever address the tooling happens to
+ * print next.
+ */
+function backgroundStarted(started: { id: string; pid: number }, command: string): Record<string, unknown> {
+  return {
+    success: true,
+    terminalId: started.id,
+    pid: started.pid,
+    message:
+      `Started in the background (terminal ${started.id}). It keeps running; do not wait for it. ` +
+      'Use browser_navigate against its address to check the page, and read the terminal output if it fails to start.',
+    command
+  };
+}
 
 export interface ToolDefinition {
   name: string;
@@ -18,6 +38,12 @@ export interface ToolDefinition {
   parameters: Record<string, any>;
   /** Tools that cannot run while the agent is in Plan Mode (spec §7). */
   mutating?: boolean;
+  /**
+   * The runtime answers this tool by asking the user, not by running code. It is
+   * advertised like any other tool so every provider sees it, but `execute` is
+   * never reached — see `AgentRuntime.handleQuestionCall`.
+   */
+  interactive?: boolean;
   execute: (args: any, projectPath: string, onFileChange?: (change: FileChange) => void) => Promise<any>;
 }
 
@@ -359,7 +385,8 @@ export class ToolRegistry {
           },
           port: {
             type: 'number',
-            description: 'The port the command listens on, when it is known — lets the preview open before the server has printed anything'
+            description:
+              'The port the command listens on, when it is known — lets the preview open before the server has printed anything. Leave it out and the app picks one from this project\u2019s own range (1000+ for a frontend, 3000+ for a backend) and passes it to the command; do not invent one.'
           }
         },
         required: ['command']
@@ -371,20 +398,34 @@ export class ToolRegistry {
         // A port named up front is registered immediately, so the panel can
         // open while the server is still booting rather than after it has
         // printed its banner.
-        const port = Number(args.port);
-        if (Number.isFinite(port) && port > 0 && port < 65536) {
-          previewRegistry.remember(`http://localhost:${port}`, 'run_terminal');
+        const named = Number(args.port);
+        if (Number.isFinite(named) && named > 0 && named < 65536) {
+          previewRegistry.remember(`http://localhost:${named}`, 'run_terminal', projectPath);
+          const started = terminalService.startServer(command, projectPath);
+          return backgroundStarted(started, command);
         }
 
-        const started = terminalService.startServer(command, projectPath);
+        // Otherwise the port is this app's decision, and the same one the
+        // preview panel would make: 1000+ for a frontend, 3000+ for a backend,
+        // never a port another project is already holding. A dev server the
+        // agent starts is a dev server the user will want to look at.
+        const script = scriptBodyFor(projectPath, command);
+        const plan = await planDevServerLaunch({
+          projectPath,
+          command,
+          script: script?.script,
+          body: script?.body
+        });
+        if (plan.port) previewRegistry.remember(`http://localhost:${plan.port}`, 'run_terminal', projectPath);
+        // `PORT` as well as the flag: a command that takes no port argument —
+        // `node server.js` — reads the variable instead.
+        const started = plan.port
+          ? terminalService.startServer(plan.command, projectPath, undefined, { PORT: String(plan.port) })
+          : terminalService.startServer(plan.command, projectPath);
         return {
-          success: true,
-          terminalId: started.id,
-          pid: started.pid,
-          message:
-            `Started in the background (terminal ${started.id}). It keeps running; do not wait for it. ` +
-            'Use browser_navigate against its address to check the page, and read the terminal output if it fails to start.',
-          command
+          ...backgroundStarted(started, plan.command),
+          port: plan.port ?? undefined,
+          url: plan.port ? `http://localhost:${plan.port}` : undefined
         };
       }
     });
@@ -630,6 +671,52 @@ export class ToolRegistry {
         const result = await mcpClient.callTool(String(args.server), String(args.tool), args.args || {});
         if (!result.success) throw new Error(result.error || 'MCP tool call failed');
         return result.output;
+      }
+    });
+
+    this.register({
+      name: 'ask_question',
+      interactive: true,
+      description:
+        'Ask the user to decide something only they can decide, and wait for the answer. Give every question 2-4 concrete options (plus an optional free-text note) — never an open "what do you want?". ALWAYS include your recommendation: set "recommended": true (with a short "reason") on the option you would pick, or pass "aiSuggestion" when the lean is between options. The card shows the recommendation so the user can decide in one click — a question with no recommendation wastes their time. In Plan Mode, ask BEFORE writing the plan whenever the request leaves a real decision open: scope, target user, data source, platform, brand, how far to go. In Build Mode, ask when a detail that would change what you write is genuinely missing: which store, which provider, which currency, which folder. Do not ask about anything you can find in the project, and do not ask what the user already said. At most 4 questions per call.',
+      parameters: {
+        type: 'object',
+        properties: {
+          questions: {
+            type: 'array',
+            description: 'One to four questions, asked together in a single card.',
+            items: {
+              type: 'object',
+              properties: {
+                header: { type: 'string', description: 'Two or three words naming the topic' },
+                question: { type: 'string', description: 'The question itself, in the user\'s language' },
+                aiSuggestion: { type: 'string', description: 'Your recommended answer and why, in one short sentence, when the lean is not a single option' },
+                options: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      label: { type: 'string', description: 'The answer, short enough to be a button' },
+                      description: { type: 'string', description: 'One line on what choosing it means' },
+                      recommended: { type: 'boolean', description: 'True on the ONE option you recommend' },
+                      reason: { type: 'string', description: 'One line on why it is recommended' }
+                    },
+                    required: ['label']
+                  }
+                },
+                multiSelect: { type: 'boolean', description: 'True when several options can be true at once' },
+                allowFreeText: { type: 'boolean', description: 'Also let the user answer in their own words' }
+              },
+              required: ['question']
+            }
+          }
+        },
+        required: ['questions']
+      },
+      execute: async () => {
+        // Reachable only if the runtime forgot to intercept it; failing loudly is
+        // better than a question that silently becomes an empty answer.
+        throw new Error('ask_question is answered by the agent runtime, not by the tool registry');
       }
     });
 

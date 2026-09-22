@@ -16,11 +16,19 @@ describe('buildStrip', () => {
 
   it('appends a session that is not in the strip rather than putting it first', () => {
     const stored = [tab('a', 100), tab('b', 200)];
-    const strip = buildStrip(stored, [], { id: '__new__', title: 'new' });
-    expect(strip.map((t) => t.id)).toEqual(['a', 'b', '__new__']);
+    const strip = buildStrip(stored, [], tab('fresh', 300));
+    expect(strip.map((t) => t.id)).toEqual(['a', 'b', 'fresh']);
 
     const resumed = buildStrip(stored, [], tab('old', 1));
     expect(resumed.map((t) => t.id)).toEqual(['a', 'b', 'old']);
+  });
+
+  it('adds no placeholder when nothing is live', () => {
+    const stored = [tab('a', 100), tab('b', 200)];
+    // No conversation is open, so the strip is exactly what is stored — a
+    // session that has not started does not get a tab of its own.
+    expect(buildStrip(stored, [], null).map((t) => t.id)).toEqual(['a', 'b']);
+    expect(buildStrip([], [], null)).toEqual([]);
   });
 
   it('honours a dragged order while keeping unnamed sessions in creation order', () => {

@@ -27,10 +27,46 @@ export type Updater = {
   checkForUpdates: () => Promise<unknown>;
   downloadUpdate: () => Promise<unknown>;
   quitAndInstall: (isSilent?: boolean, isForceRunAfter?: boolean) => void;
+  /** Present on electron-updater 6; used by the self-hosted feed override. */
+  setFeedURL?: (options: { provider: string; url: string }) => void;
 };
+
+/**
+ * Where a packaged build looks for updates, unless the environment says
+ * otherwise. electron-builder bakes a GitHub feed in from `build.publish`;
+ * `D4IDE_UPDATE_FEED_URL` repoints the same machinery at any static host that
+ * serves a `latest.yml` — which is how an on-prem feed works and how the full
+ * check→download→ready flow is proven locally without touching GitHub.
+ */
+export function resolveFeedOverride(env: NodeJS.ProcessEnv): string | null {
+  const raw = (env.D4IDE_UPDATE_FEED_URL || '').trim();
+  return raw.length > 0 ? raw : null;
+}
 
 /** Release notes can be long; the banner shows one line, Settings shows a block. */
 const NOTES_LIMIT = 2000;
+
+/**
+ * Whether a feed's answer means "there is nothing to install" rather than "the
+ * check failed".
+ *
+ * A repository that has not published a release answers every check with 404,
+ * "No published versions on GitHub", or a missing `latest.yml`. That is the
+ * normal state of a project between releases, not a fault, and reporting it as
+ * an error put a red line on the Updates screen at every launch — the fastest
+ * way to teach someone that update errors can be ignored. The distinction is
+ * made here, once, so the screen and the schedule agree about it.
+ */
+export function isNothingPublished(message: string, code?: string): boolean {
+  const text = `${message} ${code ?? ''}`;
+  if (/NO_PUBLISHED_VERSIONS/i.test(text)) return true;
+  if (/no published versions/i.test(text)) return true;
+  // A missing feed file is the same answer from a different provider: the
+  // release this build would be compared against simply is not there yet.
+  if (/latest\.(yml|yaml)\b/i.test(text) && /(404|not found|cannot find|ENOENT|unable to find)/i.test(text)) return true;
+  if (/\b404\b/.test(text) && /(http|github|feed|request|release|update)/i.test(text)) return true;
+  return false;
+}
 
 export class UpdateService {
   private status: UpdateStatus = { state: 'idle' };
@@ -203,6 +239,15 @@ export class UpdateService {
       this.publish({ state: 'ready', version: info?.version, checkedAt: Date.now() })
     );
     updater.on('error', (error: Error) => {
+      const code = (error as Error & { code?: string })?.code;
+      if (isNothingPublished(error.message || '', code)) {
+        logService.info('app', 'The update feed has no release to offer', {
+          error: error.message,
+          code
+        });
+        this.publish({ state: 'idle', checkedAt: Date.now() });
+        return;
+      }
       logService.warn('app', 'Update check failed', { error: error.message });
       this.publish({ state: 'error', error: error.message, checkedAt: Date.now() });
     });
@@ -223,6 +268,13 @@ export class UpdateService {
     try {
       const module = await import('electron-updater');
       const updater = (module as any).autoUpdater as Updater;
+      // An explicit feed wins over the baked-in one. Set before any check so
+      // even the first `checking-for-update` event talks to the right host.
+      const feedUrl = resolveFeedOverride(process.env);
+      if (feedUrl && typeof updater.setFeedURL === 'function') {
+        logService.info('app', 'Update feed overridden by environment', { url: feedUrl });
+        updater.setFeedURL({ provider: 'generic', url: feedUrl });
+      }
       this.attach(updater);
       this.updater = updater;
       return updater;
@@ -254,7 +306,19 @@ export class UpdateService {
       this.publish({ state: 'checking' });
       await updater.checkForUpdates();
     } catch (error) {
-      this.publish({ state: 'error', error: (error as Error).message, checkedAt: Date.now() });
+      // electron-updater reports "the repository has no release" both as an
+      // event and as a rejected promise from `checkForUpdates()`. The event is
+      // already classified above; classifying the rejection too is what keeps a
+      // repository between releases off the red. (Seen in the wild: a fresh
+      // 1.1.0 build checking a feed that has not been published yet.)
+      const message = (error as Error).message;
+      const code = (error as Error & { code?: string })?.code;
+      if (isNothingPublished(message, code)) {
+        logService.info('app', 'The update feed has no release to offer', { error: message, code });
+        this.publish({ state: 'idle', checkedAt: Date.now() });
+      } else {
+        this.publish({ state: 'error', error: message, checkedAt: Date.now() });
+      }
     } finally {
       this.busy = false;
       if (this.status.state === 'checking') {

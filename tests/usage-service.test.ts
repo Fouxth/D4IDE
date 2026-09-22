@@ -1,44 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import {
-  aggregate,
-  bucketBy,
-  buildSummary,
-  calculateCost,
-  evaluateBudget,
-  startOfMonth
-} from '../src/main/ai/usage/usage-service';
-import { AppSettings, UsageRecord } from '../src/shared/types';
-
-const settings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
-  language: 'th',
-  theme: 'd4-dark',
-  fontSize: 14,
-  permissionMode: 'safe',
-  defaultMode: 'build',
-  autoRunTests: true,
-  autoRunBuild: true,
-  maxAgentSteps: 30,
-  activeProviderId: 'deepseek',
-  activeModelId: 'deepseek-chat',
-  routingProfile: 'balanced',
-  reasoningEffort: 'medium',
-  dailyBudget: 5,
-  monthlyBudget: 50,
-  perRequestBudget: 0.5,
-  budgetHardStop: false,
-  budgetWarnThreshold: 0.8,
-  autoFallback: false,
-  fallbackChain: [],
-  toolTimeoutMs: 120000,
-  retryLimit: 2,
-  checkpointFrequency: 'write',
-  favoriteModels: [],
-  recentModels: [],
-  recentProjects: [],
-  sessionOrder: [],
-  firstRunComplete: true,
-  ...overrides
-});
+import { aggregate, bucketBy, buildSummary, calculateCost, startOfMonth } from '../src/main/ai/usage/usage-service';
+import { UsageRecord } from '../src/shared/types';
 
 const record = (overrides: Partial<UsageRecord> = {}): UsageRecord => ({
   id: `u_${Math.random().toString(36).slice(2, 8)}`,
@@ -127,20 +89,10 @@ describe('bucketBy', () => {
   });
 });
 
-describe('evaluateBudget', () => {
-  it('warns past the threshold and flags an exceeded budget', () => {
-    const warn = evaluateBudget(settings({ dailyBudget: 10, budgetWarnThreshold: 0.8 }), 8.5, 20);
-    expect(warn.warn).toBe(true);
-    expect(warn.exceeded).toBe(false);
-
-    const exceeded = evaluateBudget(settings({ dailyBudget: 10 }), 11, 20);
-    expect(exceeded.exceeded).toBe(true);
-  });
-
-  it('ignores a budget of zero', () => {
-    const result = evaluateBudget(settings({ dailyBudget: 0, monthlyBudget: 0 }), 5, 5);
-    expect(result.warn).toBe(false);
-    expect(result.exceeded).toBe(false);
+describe('usage reporting', () => {
+  it('carries no verdict about limits — it only reports what was spent', () => {
+    const summary = buildSummary([record()], 's1', Date.now());
+    expect(Object.keys(summary)).not.toContain('budget');
   });
 });
 
@@ -156,7 +108,6 @@ describe('buildSummary', () => {
         record({ sessionId: 's2', timestamp: yesterday, estimatedCost: 0.25, inputTokens: 50 }),
         record({ sessionId: 's2', timestamp: lastMonth, estimatedCost: 0.75, inputTokens: 10 })
       ],
-      settings(),
       's1',
       now
     );
@@ -170,7 +121,7 @@ describe('buildSummary', () => {
   });
 
   it('reports session totals as zero when no session is active', () => {
-    const summary = buildSummary([record()], settings(), null, Date.now());
+    const summary = buildSummary([record()], null, Date.now());
     expect(summary.session.requests).toBe(0);
     expect(summary.today.requests).toBe(1);
   });

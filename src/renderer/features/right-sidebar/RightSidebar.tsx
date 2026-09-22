@@ -13,7 +13,10 @@ import {
   ChevronDown,
   Pencil,
   Check,
-  PanelRightClose
+  PanelRightClose,
+  Lock,
+  Copy,
+  RotateCw
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChangesStore } from '../../stores/changesStore';
@@ -26,6 +29,7 @@ import { toast } from '../../stores/toastStore';
 import { Checkpoint, EMPTY_MISSION, Mission, SkillItem } from '../../../shared/types';
 import { UsagePanel } from '../usage/UsagePanel';
 import { GitTab } from './GitTab';
+import { RulesPanel } from '../rules/RulesPanel';
 import { LazyPanel } from '../../components/LazyPanel';
 
 /**
@@ -39,6 +43,8 @@ const TerminalPanel = React.lazy(() =>
 );
 import { formatTokens, formatRelativeTime } from '../../lib/format';
 import { devServerUrlFromCommand, startsDevServer, isLocalUrl } from '../../lib/preview-url';
+import { insideFolder } from '../../../shared/project-paths';
+import { PREVIEW_VIEWPORTS, fitScale, presetWidth } from '../../lib/preview-viewport';
 
 export type RightPanelTab =
   | 'queue'
@@ -51,7 +57,8 @@ export type RightPanelTab =
   | 'preview'
   | 'terminal'
   | 'git'
-  | 'skills';
+  | 'skills'
+  | 'rules';
 
 type TabId = RightPanelTab;
 
@@ -118,7 +125,35 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   const [skillsExpanded, setSkillsExpanded] = useState(false);
   const [editingSkill, setEditingSkill] = useState<SkillItem | null>(null);
   const [checkpoints, setCheckpoints] = useState<CheckpointSummary[]>([]);
-  const [previewUrl, setPreviewUrl] = useState('http://localhost:5173');
+  /**
+   * The address the frame is showing — `''` until something real is found.
+   *
+   * It used to start as `http://localhost:5173`, which is the address *one*
+   * kind of project uses. Every other project opened the panel on a dead port
+   * and looked broken, and a project serving on 4000 was never tried at all.
+   * The address now only ever comes from the project itself: the port its own
+   * script declares, the address its server printed, or the port a running dev
+   * process is listening on (see `detectPreview`).
+   */
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [isLaunching, setIsLaunching] = useState(false);
+  /**
+   * The frame's width preset.
+   *
+   * A layout that only works at 1440px is not a layout that works, and resizing
+   * the whole window to check is the slowest way to find that out.
+   */
+  const [previewViewport, setPreviewViewport] = useState<'responsive' | 'desktop' | 'tablet' | 'mobile'>(
+    'responsive'
+  );
+  /**
+   * The frame's measured box. A fixed viewport lays the app out at the device's
+   * real width (834px tablet, 390px phone — see `presetWidth`) and then scales
+   * that stage to fit this box, so the numbers need to be known to compute the
+   * scale. Measured, not assumed: the panel is user-resizable.
+   */
+  const [frameEl, setFrameEl] = useState<HTMLDivElement | null>(null);
+  const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
   const [detectedUrls, setDetectedUrls] = useState<string[]>([]);
   /**
    * Whether anything is actually answering on `previewUrl`. An iframe pointed at
@@ -138,16 +173,30 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   const [mission, setMission] = useState<Mission>({ ...EMPTY_MISSION });
   const [missionSaved, setMissionSaved] = useState(true);
 
-  // The mission belongs to the current session, so it is loaded per session id.
+  /**
+   * The mission belongs to the current session, so it is loaded per session id.
+   *
+   * It is mirrored into the agent store as well: the goal card above the
+   * transcript shows only when a mission exists, and two components reading two
+   * copies of one value is how a card and a switch start disagreeing.
+   */
   useEffect(() => {
     if (!window.electronAPI || !sessionId) {
       setMission({ ...EMPTY_MISSION });
+      useAgentStore.setState({ mission: null });
       return;
     }
     void window.electronAPI
       .getMission(sessionId)
-      .then((stored: Mission | null) => setMission(stored ? { ...EMPTY_MISSION, ...stored } : { ...EMPTY_MISSION }))
-      .catch(() => setMission({ ...EMPTY_MISSION }));
+      .then((stored: Mission | null) => {
+        const merged = stored ? { ...EMPTY_MISSION, ...stored } : { ...EMPTY_MISSION };
+        setMission(merged);
+        useAgentStore.setState({ mission: merged.objective?.trim() ? merged : null });
+      })
+      .catch(() => {
+        setMission({ ...EMPTY_MISSION });
+        useAgentStore.setState({ mission: null });
+      });
   }, [sessionId]);
 
   const patchMission = (patch: Partial<Mission>) => {
@@ -161,7 +210,9 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
       return;
     }
     const stored = await window.electronAPI.setMission(sessionId, mission);
-    setMission(stored ? { ...EMPTY_MISSION, ...stored } : { ...EMPTY_MISSION });
+    const merged = stored ? { ...EMPTY_MISSION, ...stored } : { ...EMPTY_MISSION };
+    setMission(merged);
+    useAgentStore.setState({ mission: merged.objective?.trim() ? merged : null });
     setMissionSaved(true);
     toast.success(stored ? t('mission.saved') : t('mission.cleared'));
   };
@@ -172,6 +223,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
     // mission that still gets sent would be a lie.
     if (missionSaved && mission.objective) {
       setMission({ ...EMPTY_MISSION });
+      useAgentStore.setState({ mission: null });
       if (window.electronAPI && sessionId) await window.electronAPI.setMission(sessionId, { ...EMPTY_MISSION });
       toast.info(t('mission.cleared'));
       return;
@@ -195,19 +247,98 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
       .catch(console.error);
   };
 
-  const detectPreview = async () => {
+  /**
+   * Looks for a local server to show.
+   *
+   * `notify` is only true when the user asked by pressing the button. Switching
+   * to the preview tab runs this too, and toasting "no dev server" every single
+   * time stacked five identical notices over a panel that already says exactly
+   * that, with the two buttons that fix it.
+   */
+  const detectPreview = async (notify = false) => {
     if (!window.electronAPI) return;
+    // No folder, no preview: every address on the machine belongs to somebody,
+    // and without a project there is nothing to tell whose it is.
+    if (!projectPath) {
+      setDetectedUrls([]);
+      setPreviewUrl('');
+      setPreviewState('idle');
+      if (notify) toast.info(t('rightSidebar.launchNeedsProject'));
+      return;
+    }
     setIsDetecting(true);
     try {
       // The main process orders these: servers that printed their address and
-      // answer come first, then anything still booting. A port that answers
-      // nothing is not in the list at all.
+      // answer come first, then ports the project declares, then ports a dev
+      // process is listening on, then anything still booting. A port that
+      // answers nothing is not in the list at all.
       const urls = await window.electronAPI.detectPreviewUrls(projectPath || undefined);
       setDetectedUrls(urls);
-      if (urls.length > 0 && !urls.includes(previewUrl)) setPreviewUrl(urls[0]);
-      if (urls.length === 0) toast.info(t('rightSidebar.noDevServer'));
+      // Follow the project: when the address on screen is gone (the server was
+      // restarted on another port) or nothing has been picked yet, take the
+      // best answer. A live address the user chose by hand is left alone.
+      if (urls.length > 0 && (!previewUrl || !urls.includes(previewUrl))) {
+        if (!previewUrl || !(await answers(previewUrl))) setPreviewUrl(urls[0]);
+      }
+      if (notify) {
+        if (urls.length === 0) toast.info(t('rightSidebar.noDevServer'));
+        else toast.success(t('rightSidebar.foundDevServer'), urls[0]);
+      }
     } finally {
       setIsDetecting(false);
+    }
+  };
+
+  /**
+   * Starts the project's dev server from the panel.
+   *
+   * Without this the panel could only ever explain that nothing was running —
+   * and the user's next question ("so start it") had no answer here. The command
+   * is the one the project declares in `package.json`; the address arrives
+   * through the discovered-url event once the server prints it.
+   */
+  const launchPreview = async () => {
+    if (!window.electronAPI?.launchPreview) return;
+    if (!projectPath) {
+      toast.info(t('rightSidebar.launchNeedsProject'));
+      return;
+    }
+    setIsLaunching(true);
+    try {
+      const result = await window.electronAPI.launchPreview(projectPath);
+      // The project was already serving: point at the running server instead
+      // of starting a twin that would fight it for the port.
+      if (result?.alreadyRunning) {
+        const url = String(result.url || '');
+        if (url) {
+          setPreviewUrl(url);
+          setDetectedUrls((prev) => (prev.includes(url) ? prev : [url, ...prev]));
+          setPreviewState('checking');
+        }
+        toast.info(t('rightSidebar.alreadyRunning'), url || undefined);
+        return;
+      }
+      if (!result?.started) {
+        // A declared port another project holds is refused by the main process,
+        // not raced — say which port, or the error reads as a generic failure.
+        if (result?.error === 'port-busy' && result?.port) {
+          toast.error(t('rightSidebar.portBusy', { port: String(result.port) }));
+          return;
+        }
+        toast.error(t('rightSidebar.launchFailed'), String(result?.error || ''));
+        return;
+      }
+      // The port was decided before the server started, so the panel can point
+      // at it right away — and if the server ends up somewhere else, its own
+      // banner is what corrects the address a moment later.
+      toast.success(t('rightSidebar.launchStarted'), String(result.url || result.command));
+      if (typeof result.url === 'string' && result.url) setPreviewUrl(result.url);
+      setPreviewState('checking');
+      // The server needs a moment to bind its port; probing now would only
+      // report "offline" on a perfectly healthy start.
+      setTimeout(() => void detectPreview(false), 2500);
+    } finally {
+      setIsLaunching(false);
     }
   };
 
@@ -218,11 +349,29 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   useEffect(() => {
     if (activeTab === 'checkpoints') refreshCheckpoints();
     if (activeTab === 'usage') loadUsage();
-    if (activeTab === 'preview') detectPreview();
+    if (activeTab === 'preview') void detectPreview(false);
   }, [activeTab]);
+
+  /**
+   * The preview is the *open project's* preview, so switching projects has to
+   * take the old address with it.
+   *
+   * Leaving it on screen was how a neighbouring project's app ended up inside
+   * this panel: the address outlived the project it belonged to, and the frame
+   * kept rendering something that had nothing to do with the folder on screen.
+   */
+  useEffect(() => {
+    setPreviewUrl('');
+    setDetectedUrls([]);
+    setPreviewState('idle');
+    lastAutoOpened.current = null;
+    if (activeTab === 'preview') void detectPreview(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectPath]);
 
   /** True when something is answering on the address. */
   const answers = async (url: string): Promise<boolean> => {
+    if (!url) return false;
     try {
       await fetch(url, { mode: 'no-cors', signal: AbortSignal.timeout(3000) });
       return true;
@@ -238,7 +387,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
    * that is running perfectly well on a different port.
    */
   const probePreview = async (url = previewUrl) => {
-    if (!url) return;
+    if (!url) {
+      // Nothing to show yet. The panel says so, with the button that finds or
+      // starts the project's own server, instead of pointing at a dead port.
+      setPreviewState(detectedUrls.length > 0 ? 'idle' : 'offline');
+      return;
+    }
     setPreviewState('checking');
     if (await answers(url)) {
       setPreviewState('ready');
@@ -267,10 +421,32 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, previewUrl]);
 
+  /** Keeps the frame's measured box current while the panel is resized. */
+  useEffect(() => {
+    if (!frameEl) return;
+    const measure = () => setFrameSize({ width: frameEl.clientWidth, height: frameEl.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(frameEl);
+    return () => observer.disconnect();
+  }, [frameEl]);
+
+  /**
+   * A fixed preset renders a stage at the device's real width, scaled by `fit`
+   * into the panel; `responsive` simply fills it. The first paint before the
+   * observer reports falls back to filling, so a wrong-looking guess never
+   * lingers longer than one frame.
+   */
+  const presetWidthPx = presetWidth(previewViewport);
+  const fit = presetWidthPx && frameSize.width > 0 ? fitScale(presetWidthPx, frameSize.width) : 1;
+
   /**
    * The most recent thing the agent did that implies a local web server: either
    * a command that starts one, or the browser tool visiting a local address.
    */
+  /** There is an address — or a candidate for one — for the frame to show. */
+  const hasPreviewTarget = !!previewUrl || detectedUrls.length > 0;
+
   const previewSignal = useMemo(() => {
     for (let i = timeline.length - 1; i >= 0; i -= 1) {
       const item = timeline[i];
@@ -293,9 +469,8 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
    */
   useEffect(() => {
     if (!previewSignal || previewSignal.id === lastAutoOpened.current) return;
-    lastAutoOpened.current = previewSignal.id;
-    if (previewSignal.url) setPreviewUrl(previewSignal.url);
-    else void detectPreview();
+    lastAutoOpened.current = previewSignal.id;      if (previewSignal.url) setPreviewUrl(previewSignal.url);
+    else void detectPreview(false);
     setActiveTab('preview');
     toast.info(t('rightSidebar.previewOpened'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -312,9 +487,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   useEffect(() => {
     const subscribe = window.electronAPI?.onPreviewDiscovered;
     if (typeof subscribe !== 'function') return;
-    return subscribe((payload: { url?: string } | null) => {
+    return subscribe((payload: { url?: string; folder?: string | null } | null) => {
       const url = payload?.url;
       if (!url || url === lastAutoOpened.current) return;
+      // A server that belongs to another project is not this panel's news —
+      // opening the preview on it is how the neighbouring app ended up here.
+      if (!insideFolder(payload?.folder || undefined, projectPath)) return;
       lastAutoOpened.current = url;
       setPreviewUrl(url);
       setDetectedUrls((prev) => (prev.includes(url) ? prev : [url, ...prev]));
@@ -374,7 +552,8 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
     { id: 'context', label: t('rightSidebar.context') },
     { id: 'usage', label: t('rightSidebar.usage') },
     { id: 'checkpoints', label: t('rightSidebar.checkpoints') },
-    { id: 'git', label: t('rightSidebar.git'), dot: gitDirty }
+    { id: 'git', label: t('rightSidebar.git'), dot: gitDirty },
+    { id: 'rules', label: t('rules.title') }
   ];
 
   useEffect(() => {
@@ -482,39 +661,14 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
           />
         </button>
 
-        <button
-          onClick={() => setActiveTab('mission')}
-          className={`px-2 py-0.5 rounded-full border text-[11px] transition-colors shrink-0 ${
-            activeTab === 'mission'
-              ? 'border-d4-accent/50 text-d4-accent bg-d4-accent/10'
-              : 'border-d4-border text-d4-muted hover:text-d4-text'
-          }`}
-        >
-          {t('rightSidebar.mission')}
-        </button>
-
+        {/* The bar used to repeat two controls that already exist one line
+            above and one tab over: a "mission" pill that did no more than the
+            tab strip, and a cycling effort chip whose chevron promised a menu
+            it never opened. The effort itself is chosen where the rest of the
+            mission is edited — three labelled buttons, not a number. */}
         <span className="flex-1 min-w-0 truncate text-[11px] text-d4-dimmed">
           {mission.objective || t('mission.none')}
         </span>
-
-        <button
-          onClick={() => {
-            const order = ['low', 'medium', 'high'] as const;
-            const next = order[(order.indexOf(mission.effort) + 1) % order.length];
-            patchMission({ effort: next });
-            if (sessionId && mission.objective) {
-              void window.electronAPI?.setMission(sessionId, { ...mission, effort: next });
-              setMissionSaved(true);
-            }
-          }}
-          title={t('mission.effort')}
-          className="flex items-center gap-1 px-1.5 py-0.5 rounded-sm text-[11px] text-d4-dimmed hover:text-d4-text transition-colors shrink-0"
-        >
-          <span>
-            {t('mission.effort')} {mission.effort === 'low' ? 1 : mission.effort === 'medium' ? 2 : 3}
-          </span>
-          <ChevronDown className="w-3 h-3" />
-        </button>
       </div>
 
       <div className={`flex-1 min-h-0 ${activeTab === 'preview' || activeTab === 'terminal' ? 'flex flex-col' : 'overflow-y-auto p-3'}`}>
@@ -524,22 +678,17 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <span className="d4-label">{t('rightSidebar.skills')}</span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => setEditingSkill({ id: '', name: '', description: '', content: '', isGlobal: false })}
-                    title={t('rightSidebar.editSkills')}
-                    className="text-d4-dimmed hover:text-d4-text"
-                  >
-                    <Pencil className="w-3 h-3" />
-                  </button>
-                  <button
-                    onClick={() => setActiveTab('skills')}
-                    title={t('rightSidebar.addSkill')}
-                    className="text-d4-dimmed hover:text-d4-text"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                {/* One button, not two. The pencil next to this one was titled
+                    "manage skills" but did the same job as the plus — it opened
+                    a blank editor — and the skills tab behind the plus already
+                    has its own add. Two doors to one room is just clutter. */}
+                <button
+                  onClick={() => setActiveTab('skills')}
+                  title={t('rightSidebar.addSkill')}
+                  className="text-d4-dimmed hover:text-d4-text"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
               </div>
 
               {skills.length === 0 ? (
@@ -1064,72 +1213,245 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
         )}
 
         {/* -------------------------------------------------------- PREVIEW */}
-        {activeTab === 'preview' && (
+        {/*
+         * Nothing of this project's is serving yet: one button, one sentence,
+         * both centred.
+         *
+         * The panel used to answer this case with an address bar, a row of port
+         * chips and three buttons — tools for a page that was not there, over an
+         * empty white frame that made the project look broken. The one thing the
+         * user needs at that moment is the action that puts a page there.
+         */}
+        {activeTab === 'preview' && !hasPreviewTarget && (
+          <div className="flex-1 flex flex-col items-center justify-center gap-3 bg-d4-panel border border-d4-border rounded-md p-6 text-center min-h-[240px]">
+            <button
+              onClick={() => void launchPreview()}
+              disabled={isLaunching || !projectPath}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-d4-accent text-black text-xs font-semibold hover:opacity-90 transition disabled:opacity-40"
+              title={t('rightSidebar.launchPreview')}
+            >
+              <Play className={`w-4 h-4 ${isLaunching ? 'animate-pulse' : ''}`} />
+              {isLaunching ? t('rightSidebar.launching') : t('rightSidebar.launchPreview')}
+            </button>
+            <p className="text-[11px] text-d4-muted max-w-[320px] leading-relaxed">
+              {projectPath ? t('rightSidebar.previewEmptyHint') : t('rightSidebar.launchNeedsProject')}
+            </p>
+            <button
+              onClick={() => void detectPreview(true)}
+              className="text-[10px] text-d4-dimmed hover:text-d4-text underline underline-offset-2"
+            >
+              {t('rightSidebar.detect')}
+            </button>
+          </div>
+        )}
+
+        {activeTab === 'preview' && hasPreviewTarget && (
           <div className="flex-1 flex flex-col gap-1.5 p-2 min-h-0">
-            <div className="flex items-center space-x-1.5 bg-d4-surface border border-d4-border rounded-md p-1 shrink-0">
+            {/*
+             * A browser's tool row, in the order a browser has it: the address,
+             * then what you can do with it. The address is a chip rather than a
+             * raw input so that copying it — the thing people actually want — is
+             * one click instead of a text selection.
+             */}
+            <div className="flex items-center gap-1 bg-d4-surface border border-d4-border rounded-md p-1 shrink-0">
+              <Lock className="w-3 h-3 text-d4-dimmed shrink-0 ml-1" />
               <input
                 type="text"
                 value={previewUrl}
                 onChange={(e) => setPreviewUrl(e.target.value)}
-                className="flex-1 bg-transparent px-2 py-0.5 text-xs text-d4-text outline-none font-mono"
+                spellCheck={false}
+                placeholder={t('rightSidebar.addressPlaceholder')}
+                aria-label={t('rightSidebar.address')}
+                className="flex-1 min-w-0 bg-transparent px-1 py-0.5 text-[11px] text-d4-text outline-none font-mono placeholder:text-d4-dimmed"
               />
               <button
-                onClick={() => window.electronAPI?.openExternal(previewUrl)}
-                className="p-1 hover:bg-d4-panel text-d4-muted hover:text-d4-text rounded"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(previewUrl).then(
+                    () => toast.success(t('rightSidebar.copied')),
+                    () => toast.error(t('rightSidebar.copyFailed'))
+                  );
+                }}
+                className="p-1 hover:bg-d4-panel text-d4-muted hover:text-d4-text rounded shrink-0"
+                title={t('rightSidebar.copyUrl')}
+              >
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => {
+                  // A reload of an iframe means a fresh key, which remounts it.
+                  if (!previewUrl) return;
+                  setPreviewState('checking');
+                  const url = previewUrl;
+                  setPreviewUrl('');
+                  setTimeout(() => setPreviewUrl(url), 0);
+                }}
+                disabled={!previewUrl}
+                className="p-1 hover:bg-d4-panel text-d4-muted hover:text-d4-text rounded shrink-0 disabled:opacity-40"
+                title={t('rightSidebar.reload')}
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => previewUrl && window.electronAPI?.openExternal(previewUrl)}
+                disabled={!previewUrl}
+                className="p-1 hover:bg-d4-panel text-d4-muted hover:text-d4-text rounded shrink-0 disabled:opacity-40"
                 title={t('rightSidebar.openExternal')}
               >
                 <ExternalLink className="w-3.5 h-3.5" />
               </button>
               <button
-                onClick={detectPreview}
-                className="p-1 hover:bg-d4-panel text-d4-muted hover:text-d4-text rounded"
+                onClick={() => void detectPreview(true)}
+                className="p-1 hover:bg-d4-panel text-d4-muted hover:text-d4-text rounded shrink-0"
                 title={t('rightSidebar.detect')}
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isDetecting ? 'animate-spin' : ''}`} />
               </button>
+              {/* Always reachable, not only when the panel has given up: a frame
+                  can be answering with the wrong thing, and starting the
+                  project's own server is the fix either way. */}
+              <button
+                onClick={() => void launchPreview()}
+                disabled={isLaunching || !projectPath}
+                className="p-1 hover:bg-d4-panel text-d4-muted hover:text-d4-text rounded shrink-0 disabled:opacity-40"
+                title={t('rightSidebar.launchPreview')}
+              >
+                <Play className={`w-3.5 h-3.5 ${isLaunching ? 'animate-pulse' : ''}`} />
+              </button>
             </div>
 
-            {detectedUrls.length > 0 && (
-              <div className="flex flex-wrap gap-1 shrink-0">
-                {detectedUrls.map((url) => (
+            <div className="flex items-center justify-between gap-1 shrink-0">
+              <div className="flex items-center gap-1">
+                {PREVIEW_VIEWPORTS.map((preset) => (
                   <button
-                    key={url}
-                    onClick={() => setPreviewUrl(url)}
-                    className={`px-2 py-0.5 rounded-sm text-[10px] font-mono border ${
-                      previewUrl === url ? 'border-d4-accent text-d4-accent' : 'border-d4-border text-d4-muted'
+                    key={preset}
+                    onClick={() => setPreviewViewport(preset)}
+                    title={t(`rightSidebar.viewport_${preset}`)}
+                    className={`px-1.5 py-0.5 rounded-sm text-[10px] border ${
+                      previewViewport === preset
+                        ? 'border-d4-accent text-d4-accent'
+                        : 'border-d4-border text-d4-muted hover:text-d4-text'
                     }`}
                   >
-                    {url.replace('http://', '')}
+                    {t(`rightSidebar.viewportShort_${preset}`)}
                   </button>
                 ))}
               </div>
-            )}
+              {detectedUrls.length > 0 && (
+                <div className="flex flex-wrap gap-1 justify-end">
+                  {detectedUrls.slice(0, 3).map((url) => (
+                    <button
+                      key={url}
+                      onClick={() => setPreviewUrl(url)}
+                      className={`px-1.5 py-0.5 rounded-sm text-[10px] font-mono border ${
+                        previewUrl === url ? 'border-d4-accent text-d4-accent' : 'border-d4-border text-d4-muted'
+                      }`}
+                    >
+                      {url.replace(/^https?:\/\//i, '').replace(/\/$/, '')}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
-            <div className="flex-1 bg-white rounded-md border border-d4-border overflow-hidden min-h-[240px] relative">
-              {previewState === 'offline' ? (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-d4-panel p-6 text-center">
-                  <p className="text-xs text-d4-text font-medium">{t('rightSidebar.previewOffline')}</p>
-                  <p className="text-[11px] text-d4-muted max-w-[280px] leading-relaxed font-mono">{previewUrl}</p>
-                  <p className="text-[11px] text-d4-muted max-w-[280px] leading-relaxed">
-                    {t('rightSidebar.previewOfflineHint')}
-                  </p>
-                  <div className="flex items-center gap-1.5 pt-1">
-                    <button
-                      onClick={() => void probePreview(previewUrl)}
-                      className="px-2.5 py-1 rounded-md text-[11px] border border-d4-border text-d4-text hover:border-d4-accent hover:text-d4-accent transition"
-                    >
-                      {t('rightSidebar.retry')}
-                    </button>
-                    <button
-                      onClick={() => void detectPreview()}
-                      className="px-2.5 py-1 rounded-md text-[11px] border border-d4-border text-d4-muted hover:text-d4-text transition"
-                    >
-                      {t('rightSidebar.detect')}
-                    </button>
+            <div
+              ref={setFrameEl}
+              className={`flex-1 bg-d4-panel rounded-md border border-d4-border min-h-[240px] relative flex justify-center ${
+                presetWidthPx && fit < 1 ? 'overflow-hidden' : 'overflow-auto'
+              }`}
+            >
+              {previewState === 'offline' || !previewUrl ? (
+                <div className="h-full w-full bg-white">
+                  <div className="h-full flex flex-col items-center justify-center gap-2 bg-d4-panel p-6 text-center">
+                    <p className="text-xs text-d4-text font-medium">
+                      {previewUrl ? t('rightSidebar.previewOffline') : t('rightSidebar.previewNoAddress')}
+                    </p>
+                    {previewUrl && (
+                      <p className="text-[11px] text-d4-muted max-w-[280px] leading-relaxed font-mono">{previewUrl}</p>
+                    )}
+                    <p className="text-[11px] text-d4-muted max-w-[280px] leading-relaxed">
+                      {previewUrl ? t('rightSidebar.previewOfflineHint') : t('rightSidebar.previewNoAddressHint')}
+                    </p>
+                    {detectedUrls.length > 0 && (
+                      <div className="flex flex-wrap gap-1 justify-center max-w-[300px]">
+                        {detectedUrls.slice(0, 4).map((url) => (
+                          <button
+                            key={url}
+                            onClick={() => setPreviewUrl(url)}
+                            className="px-2 py-0.5 rounded-sm text-[10px] font-mono border border-d4-border text-d4-muted hover:text-d4-text hover:border-d4-accent"
+                          >
+                            {url}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex items-center gap-1.5 pt-1">
+                      {/* The panel's own way out: run the script the project
+                          already declares, instead of telling the user to go and
+                          do it in a terminal. */}
+                      <button
+                        onClick={() => void launchPreview()}
+                        disabled={isLaunching || !projectPath}
+                        className="px-2.5 py-1 rounded-md text-[11px] bg-d4-accent text-black font-medium hover:opacity-90 transition disabled:opacity-40"
+                      >
+                        {isLaunching ? t('rightSidebar.launching') : t('rightSidebar.launchPreview')}
+                      </button>
+                      <button
+                        onClick={() => void probePreview(previewUrl)}
+                        className="px-2.5 py-1 rounded-md text-[11px] border border-d4-border text-d4-text hover:border-d4-accent hover:text-d4-accent transition"
+                      >
+                        {t('rightSidebar.retry')}
+                      </button>
+                      <button
+                        onClick={() => void detectPreview(true)}
+                        className="px-2.5 py-1 rounded-md text-[11px] border border-d4-border text-d4-muted hover:text-d4-text transition"
+                      >
+                        {t('rightSidebar.detect')}
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
-                <iframe key={previewUrl} src={previewUrl} title="D4IDE Web Preview" className="w-full h-full border-0" />
+                <>
+                  {/* The stage is laid out at the preset's real width — the app
+                      genuinely renders at 390px, it is not shown small — and the
+                      transform shrinks that render to fit the panel. */}
+                  <div
+                    className="bg-white h-full w-full"
+                    style={
+                      presetWidthPx && frameSize.width > 0
+                        ? {
+                            width: presetWidthPx,
+                            height: frameSize.height > 0 ? frameSize.height / fit : undefined,
+                            transform: fit < 1 ? `scale(${fit})` : undefined,
+                            transformOrigin: 'top left'
+                          }
+                        : undefined
+                    }
+                  >
+                    <iframe
+                      key={previewUrl}
+                      src={previewUrl}
+                      title="D4IDE Web Preview"
+                      className="w-full h-full border-0 bg-white"
+                    />
+                  </div>
+                  {previewState === 'checking' && (
+                    // Otherwise a probe in flight looks like a blank page, and a
+                    // blank page reads as a broken app rather than a slow one.
+                    <div className="absolute inset-0 flex items-center justify-center bg-d4-bg/70 text-[11px] text-d4-muted gap-2">
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      {t('rightSidebar.checking')}
+                    </div>
+                  )}
+                  {presetWidthPx && fit < 1 && (
+                    // Says what the chip did, in numbers: the layout width and
+                    // the zoom it took to fit, so a scaled phone frame is read
+                    // as chosen, not as broken.
+                    <div className="absolute top-1 right-1 px-1.5 py-0.5 rounded-sm bg-d4-bg/80 border border-d4-border text-[10px] font-mono text-d4-muted">
+                      {presetWidthPx}px · {Math.round(fit * 100)}%
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -1144,6 +1466,9 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
 
         {/* ------------------------------------------------------------- GIT */}
         {activeTab === 'git' && <GitTab />}
+
+        {/* ---------------------------------------------------------- RULES */}
+        {activeTab === 'rules' && <RulesPanel projectPath={projectPath} />}
 
         {/* --------------------------------------------------------- SKILLS */}
         {activeTab === 'skills' && (

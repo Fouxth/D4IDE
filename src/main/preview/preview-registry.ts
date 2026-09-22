@@ -12,6 +12,8 @@
  * script must not be able to point the frame at somebody else's site.
  */
 
+import { insideFolder } from '../../shared/project-paths';
+
 /** Local addresses only, with an explicit port. */
 const LOCAL_URL_PATTERN = /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0):(\d{2,5})(?=[/\s"'`]|$)/gi;
 
@@ -23,6 +25,14 @@ export interface DiscoveredServer {
   seenAt: number;
   /** Monotonic, so two servers seen in the same millisecond still order. */
   seq: number;
+  /**
+   * The folder the server was started from, when it is known.
+   *
+   * This is what makes a preview *this project's* preview: the addresses belong
+   * to whoever started them, and a panel that offers every address on the
+   * machine offers the neighbouring project's app as often as it offers yours.
+   */
+  folder?: string;
 }
 
 /** `0.0.0.0:3000`, `127.0.0.1:3000` and `[::1]:3000` are all the same place. */
@@ -42,19 +52,30 @@ class PreviewRegistry {
    * Reads a chunk of process output and returns the addresses in it that were
    * not known before. Known addresses are returned as an empty list so a dev
    * server that reprints its banner every reload does not reopen the panel.
+   *
+   * `folder` is the folder the output came from, which is how the address is
+   * later attributed to a project.
    */
-  observe(text: unknown, source = 'terminal'): DiscoveredServer[] {
+  observe(text: unknown, source = 'terminal', folder?: string): DiscoveredServer[] {
     if (typeof text !== 'string' || !text) return [];
     const fresh: DiscoveredServer[] = [];
     for (const match of text.matchAll(LOCAL_URL_PATTERN)) {
       const url = normalise(match[0]);
-      if (this.servers.has(url)) continue;
+      const known = this.servers.get(url);
+      if (known) {
+        // A server first seen in a command and then seen in its own output
+        // gains the folder it is actually running in; without this it would
+        // stay unattributed and disappear from its project's preview.
+        if (!known.folder && folder) known.folder = folder;
+        continue;
+      }
       const server: DiscoveredServer = {
         url,
         port: Number(match[1]),
         source,
         seenAt: Date.now(),
-        seq: ++this.sequence
+        seq: ++this.sequence,
+        folder
       };
       this.servers.set(url, server);
       fresh.push(server);
@@ -64,17 +85,31 @@ class PreviewRegistry {
   }
 
   /** Registers an address named by a command rather than printed by it. */
-  remember(url: string, source = 'command'): DiscoveredServer | null {
-    return this.observe(url, source)[0] ?? null;
+  remember(url: string, source = 'command', folder?: string): DiscoveredServer | null {
+    return this.observe(url, source, folder)[0] ?? null;
   }
 
-  /** Most recently seen first — the newest server is the one to look at. */
-  list(): DiscoveredServer[] {
-    return Array.from(this.servers.values()).sort((a, b) => b.seq - a.seq);
+  /**
+   * Most recently seen first — the newest server is the one to look at.
+   *
+   * With a folder, only the servers that folder started. Without one, every
+   * server seen since the app started.
+   */
+  list(folder?: string): DiscoveredServer[] {
+    const servers = Array.from(this.servers.values()).sort((a, b) => b.seq - a.seq);
+    if (!folder) return servers;
+    return servers.filter((server) => insideFolder(server.folder, folder));
   }
 
-  urls(): string[] {
-    return this.list().map((server) => server.url);
+  /**
+   * The addresses to offer for a project.
+   *
+   * A folder is required for a scoped answer: an address nobody can attribute is
+   * not evidence of anything about this project, and offering it is how a panel
+   * ends up showing the project next door.
+   */
+  urls(folder?: string): string[] {
+    return this.list(folder).map((server) => server.url);
   }
 
   forget(url: string): void {

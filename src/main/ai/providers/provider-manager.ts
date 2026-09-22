@@ -3,8 +3,10 @@ import { OpenAICompatibleProvider } from './openai-adapter';
 import { GeminiProvider } from './gemini-adapter';
 import { AnthropicProvider } from './anthropic-adapter';
 import { ResponsesProvider } from './responses-adapter';
+import { clampToGoPlan } from '../../../shared/opencode-go-plan';
 import { appStore } from '../../database/store';
-import { ModelInfo, ProviderConfig, ProviderTestResult } from '../../../shared/types';
+import { ModelInfo, ProviderConfig, ProviderTestAllResult, ProviderTestResult } from '../../../shared/types';
+import { vendorIdOf } from '../../../shared/provider-vendors';
 import { rankCandidates, RouterCandidate, RoutingProfile } from './router';
 import { requiresRunningEndpoint } from './provider-usability';
 
@@ -219,14 +221,95 @@ export class ProviderManager {
       });
 
     const result = await probe.testConnection(key, url, model || conf.models[0]?.id);
+    // The stored status must equal the test's verdict — that equality is the
+    // whole contract of the Test button. A gated-model failure (`model_not_found`)
+    // is NOT evidence against the key: the key authenticated far enough to be
+    // told the model is off-plan, so the provider reads `connected` and the
+    // verdict text explains the gated id. Writing `error` here made the hub stay
+    // red while real conversations kept working.
+    const gatedModelFailure = !result.success && result.errorKind === 'model_not_found';
     appStore.updateProviderMeta(providerId, {
-      status: result.success ? 'connected' : result.errorKind === 'unavailable' && conf.type === 'ollama' ? 'error' : 'error',
+      status: result.success || gatedModelFailure ? 'connected' : 'error',
       lastTestedAt: Date.now(),
-      lastError: result.success ? undefined : result.error,
+      lastError: result.success || gatedModelFailure ? undefined : result.error,
       latencyMs: result.latencyMs,
       modelCount: result.modelCount
     });
     return result;
+  }
+
+  /**
+   * Tests every provider that is ready to be talked to, one at a time.
+   *
+   * Sequential on purpose: firing every endpoint at once costs a burst of
+   * simultaneous connections (and rate-limit budget) for a button pressed once
+   * in a while. The targets are the ones the picker could actually choose — a
+   * provider with a key, or one proven reachable — so a shipped preset that was
+   * never configured costs nothing but is skipped, not failed: it was never in
+   * the running. Gated-model failures read as usable (see `testConnection`),
+   * because the key authenticated.
+   */
+  async testAll(): Promise<ProviderTestAllResult> {
+    const settings = appStore.getSettings();
+    const configs = appStore
+      .getProviders()
+      .filter((p) => p.enabled)
+      .filter((p) => !settings.removedProviderIds.includes(p.id))
+      .filter((p) => p.hasApiKey || p.status === 'connected' || p.requiresApiKey === false);
+
+    const rows: ProviderTestAllResult['rows'] = [];
+    for (const conf of configs) {
+      const result = await this.testConnection(conf.id, undefined, conf.baseUrl, conf.models[0]?.id);
+      const gated = !result.success && result.errorKind === 'model_not_found';
+      rows.push({
+        providerId: conf.id,
+        name: conf.name,
+        protocols: [conf.type],
+        success: result.success || !!gated,
+        gatedModel: gated || undefined,
+        latencyMs: result.latencyMs,
+        modelCount: result.modelCount,
+        error: result.error,
+        errorKind: result.errorKind
+      });
+    }
+
+    // Fold protocol variants into one vendor row — the hub is grouped the same
+    // way, and three red lines for one account reads as three problems.
+    const byVendor = new Map<string, ProviderTestAllResult['rows'][number]>();
+    for (const row of rows) {
+      const vendorId = vendorIdOf(row.providerId);
+      const existing = byVendor.get(vendorId);
+      if (!existing) {
+        byVendor.set(vendorId, { ...row, protocols: [...row.protocols] });
+        continue;
+      }
+      existing.protocols.push(...row.protocols);
+      // The vendor's verdict is its best one: one working protocol is a working
+      // vendor, and the working row is the one whose latency is worth showing.
+      if (!existing.success && row.success) {
+        existing.success = true;
+        existing.gatedModel = row.gatedModel;
+        existing.latencyMs = row.latencyMs;
+        existing.modelCount = row.modelCount;
+        existing.error = undefined;
+        existing.errorKind = undefined;
+      } else if (!existing.success && row.errorKind === 'invalid_key') {
+        // A key verdict outranks a network one: it is the thing the user can fix.
+        existing.errorKind = 'invalid_key';
+        existing.error = row.error;
+      }
+    }
+
+    const finalRows = Array.from(byVendor.values()).sort((a, b) =>
+      a.success === b.success ? a.name.localeCompare(b.name) : a.success ? -1 : 1
+    );
+    return {
+      rows: finalRows,
+      okCount: finalRows.filter((row) => row.success).length,
+      failCount: finalRows.filter((row) => !row.success).length,
+      testedAt: Date.now()
+    };
   }
 
   /**
@@ -283,7 +366,10 @@ export class ProviderManager {
           source: prev.source ?? 'fetched'
         } as ModelInfo;
       });
-      appStore.upsertProviderModels(providerId, merged, true);
+      // A subscription is not a gateway: Go serves a fixed list, so a `/models`
+      // answer that names anything else is dropped rather than offered. Hand-added
+      // models still survive — the upsert keeps them.
+      appStore.upsertProviderModels(providerId, clampToGoPlan(providerId, merged), true);
 
       // What the provider listed is not the whole list: hand-added models survive
       // the refresh, so report the count the user will actually see in the hub.

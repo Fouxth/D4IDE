@@ -118,5 +118,47 @@ describe('ToolRegistry', () => {
       expect(runOnce).toHaveBeenCalledWith('npm test', 'F:/project');
       expect(startServer).not.toHaveBeenCalled();
     });
+
+    /**
+     * The agent is not asked which port its server should use.
+     *
+     * A model asked to start a project's dev server picks a number from the same
+     * shortlist every time — 3000, 5173 — which is how two projects end up on one
+     * port. The app decides instead, from the project's own range.
+     */
+    it('gives a dev server a port from this project\u2019s own range', async () => {
+      const startServer = vi
+        .spyOn(terminalService, 'startServer')
+        .mockReturnValue({ id: 'server_3', pid: 7 });
+
+      const result = await registry.execute(
+        { id: 't4', name: 'run_terminal', args: { command: 'next dev', background: true } },
+        'F:/project'
+      );
+
+      const port = (result.output as { port?: number }).port;
+      expect(port).toBeGreaterThanOrEqual(1000);
+      expect(port).toBeLessThan(3000);
+      // The port has to reach the process that listens on it, as well as the
+      // panel that will look at it.
+      expect(startServer.mock.calls[0][0]).toContain(`-p ${port}`);
+      expect(startServer.mock.calls[0][3]).toEqual({ PORT: String(port) });
+      expect(previewRegistry.urls('F:/project')).toContain(`http://localhost:${port}`);
+    });
+
+    it('leaves a background command that does not listen alone', async () => {
+      const startServer = vi
+        .spyOn(terminalService, 'startServer')
+        .mockReturnValue({ id: 'server_4', pid: 8 });
+
+      const result = await registry.execute(
+        { id: 't5', name: 'run_terminal', args: { command: 'tsc --watch', background: true } },
+        'F:/project'
+      );
+
+      expect(startServer.mock.calls[0][0]).toBe('tsc --watch');
+      expect(startServer.mock.calls[0][3]).toBeUndefined();
+      expect((result.output as { port?: number }).port).toBeUndefined();
+    });
   });
 });

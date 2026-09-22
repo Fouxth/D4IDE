@@ -5,6 +5,7 @@ import { useEscapeToClose } from '../../lib/use-escape';
 import { useAgentStore } from '../../stores/agentStore';
 import { useProject } from '../../stores/projectStore';
 import { useUsageStore } from '../../stores/usageStore';
+import { useSessionsStore } from '../../stores/sessionsStore';
 import { toast } from '../../stores/toastStore';
 
 interface CommandPaletteProps {
@@ -39,7 +40,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onToggleTerminal
 }) => {
   const { t } = useTranslation();
-  const { startAgent, setMode, clearSession, cancelAgent, approvePlan, rejectPlan, status } = useAgentStore();
+  const { startAgent, setMode, cancelAgent, approvePlan, rejectPlan, status } = useAgentStore();
   const { projectPath, saveActiveFile } = useProject((s) => ({
     projectPath: s.projectPath,
     saveActiveFile: s.saveActiveFile
@@ -56,11 +57,14 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   const commands: PaletteCommand[] = useMemo(
     () => [
       {
-        id: 'new-session',
-        label: t('palette.newSession'),
+        id: 'new-thread',
+        label: `${t('nav.newThread')}  ·  Ctrl+T`,
         run: () => {
-          clearSession();
-          toast.info(t('palette.newSessionDone'));
+          // The same act as the + on the strip: a tab appears beside the others
+          // rather than the current conversation being cleared in place, which
+          // looked like the command had deleted it.
+          useSessionsStore.getState().newTab();
+          toast.info(t('palette.newThreadStarted'));
         }
       },
       { id: 'open-settings', label: t('palette.openSettings'), run: () => onOpenSettings('providers') },
@@ -138,7 +142,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     ],
     [
       t,
-      clearSession,
       onOpenSettings,
       onOpenSearch,
       setMode,

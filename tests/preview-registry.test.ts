@@ -71,4 +71,40 @@ describe('preview registry', () => {
     expect(previewRegistry.observe(null, 't')).toEqual([]);
     expect(previewRegistry.observe('', 't')).toEqual([]);
   });
+
+  /**
+   * Whose server is it?
+   *
+   * A machine with two projects open has two previews on it, and the panel for
+   * one of them offering the other's address is the bug these pin down: an
+   * address is only ever offered to the folder that started it.
+   */
+  describe('attribution to a project', () => {
+    it('offers a folder only its own servers', () => {
+      previewRegistry.observe('Local: http://localhost:1001/', 'server_1', 'F:\\alpha');
+      previewRegistry.observe('Local: http://localhost:1002/', 'server_2', 'F:\\beta');
+
+      expect(previewRegistry.urls('F:\\alpha')).toEqual(['http://localhost:1001']);
+      expect(previewRegistry.urls('F:\\beta')).toEqual(['http://localhost:1002']);
+      // Same paths, different separators and case: still the same project.
+      expect(previewRegistry.urls('f:/alpha/')).toEqual(['http://localhost:1001']);
+    });
+
+    it('counts a server started in a subfolder as the project’s', () => {
+      previewRegistry.observe('Local: http://localhost:1003/', 'server_1', 'F:\\alpha\\apps\\web');
+      expect(previewRegistry.urls('F:\\alpha')).toEqual(['http://localhost:1003']);
+      // A folder that merely shares a prefix is a different project.
+      expect(previewRegistry.urls('F:\\alpha-old')).toEqual([]);
+    });
+
+    it('claims nothing for an address it cannot attribute', () => {
+      previewRegistry.observe('Local: http://localhost:1004/', 'server_1');
+      expect(previewRegistry.urls('F:\\alpha')).toEqual([]);
+      // …though an unscoped question still sees everything, and a server that is
+      // later seen in its own output gains the folder it runs in.
+      expect(previewRegistry.urls()).toEqual(['http://localhost:1004']);
+      previewRegistry.observe('Local: http://localhost:1004/', 'server_1', 'F:\\alpha');
+      expect(previewRegistry.urls('F:\\alpha')).toEqual(['http://localhost:1004']);
+    });
+  });
 });

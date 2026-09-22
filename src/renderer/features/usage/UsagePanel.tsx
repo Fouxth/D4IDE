@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
-import { RefreshCw, DollarSign, TrendingUp, AlertTriangle } from 'lucide-react';
+import { RefreshCw, DollarSign } from 'lucide-react';
+import { RunReports } from './RunReports';
 import { useTranslation } from 'react-i18next';
 import { useUsageStore } from '../../stores/usageStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -15,24 +16,6 @@ const AggregateRow: React.FC<{ label: string; value: UsageAggregate }> = ({ labe
   </div>
 );
 
-const BudgetBar: React.FC<{ label: string; spent: number; limit: number; pct: number }> = ({ label, spent, limit, pct }) => {
-  const capped = Math.min(pct, 1);
-  const color = pct >= 1 ? 'bg-red-400' : pct >= 0.8 ? 'bg-amber-400' : 'bg-d4-accent';
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between text-[11px]">
-        <span className="text-d4-muted">{label}</span>
-        <span className="font-mono text-d4-text">
-          {formatUsd(spent)} / {formatUsd(limit)}
-        </span>
-      </div>
-      <div className="w-full bg-d4-subtle h-1.5 rounded-full overflow-hidden">
-        <div className={`h-full ${color}`} style={{ width: `${Math.max(capped * 100, 1)}%` }} />
-      </div>
-    </div>
-  );
-};
-
 export const UsagePanel: React.FC = () => {
   const { t } = useTranslation();
   const { summary, load, isLoading } = useUsageStore();
@@ -44,8 +27,6 @@ export const UsagePanel: React.FC = () => {
   if (!summary) {
     return <div className="text-center py-10 text-d4-dimmed text-xs">{t('usage.loading')}</div>;
   }
-
-  const budget = summary.budget;
 
   return (
     <div className="space-y-4">
@@ -78,27 +59,7 @@ export const UsagePanel: React.FC = () => {
         </div>
       </div>
 
-      {(budget.warn || budget.exceeded) && (
-        <div
-          className={`text-[11px] p-2 rounded border flex items-start space-x-1.5 ${
-            budget.exceeded
-              ? 'bg-red-500/10 border-red-500/30 text-red-400'
-              : 'bg-amber-500/10 border-amber-500/30 text-amber-400'
-          }`}
-        >
-          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-          <span>{budget.exceeded ? t('usage.budgetExceeded') : t('usage.budgetWarning')}</span>
-        </div>
-      )}
-
-      <div className="bg-d4-surface border border-d4-border rounded p-3 space-y-3">
-        <div className="flex items-center space-x-1.5 text-[11px] uppercase font-semibold text-d4-dimmed">
-          <TrendingUp className="w-3.5 h-3.5" />
-          <span>{t('usage.budgets')}</span>
-        </div>
-        <BudgetBar label={t('usage.today')} spent={budget.dailySpent} limit={budget.daily} pct={budget.dailyPct} />
-        <BudgetBar label={t('usage.month')} spent={budget.monthlySpent} limit={budget.monthly} pct={budget.monthlyPct} />
-      </div>
+      <RunReports records={summary.recent} />
 
       <div className="space-y-0.5">
         <AggregateRow label={t('usage.today')} value={summary.today} />

@@ -3,6 +3,7 @@ import {
   AgentMode,
   AgentStatus,
   AppSettings,
+  AgentQuestion,
   AgentTimelineItem,
   AgentTodo,
   ApprovalRequest,
@@ -16,11 +17,19 @@ import {
   PlanScope,
   PlanStepDecision,
   PromptImage,
+  QuestionAnswer,
   SessionTranscript,
   SubagentRole,
   ToolCall,
   ToolResult
 } from '../../../shared/types';
+import {
+  formatAnswersForModel,
+  isAnswerable,
+  normalizeAnswer,
+  normalizeQuestions,
+  questionCardTitle
+} from '../../../shared/questions';
 import { IPC_CHANNELS } from '../../../shared/ipc-events';
 import { providerManager, AutoRouteDecision } from '../providers/provider-manager';
 import { IAIProvider, classifyThrownError } from '../providers/provider-interface';
@@ -29,8 +38,10 @@ import { permissionEngine } from '../../security/permission-engine';
 import { contextEngine } from '../context/context-engine';
 import { SUBAGENTS, SubagentDefinition, buildSubagentSystemPrompt, getSubagent } from './subagents';
 import { buildCompletionSummary } from './completion-summary';
+import { buildFollowUpSuggestions } from '../../../shared/followup-suggestions';
 import {
   RunLedger,
+  LoopVerdict,
   loopNotice,
   repetitionNotice,
   reuseNotice,
@@ -38,9 +49,24 @@ import {
   compressForBudget
 } from './token-discipline';
 import { formatMission } from './mission-prompt';
-import { ProjectMemory, buildMemoryBlock, memoryUpkeepRules, readProjectMemory } from '../../project/project-memory';
+import { destructiveRequested, formatRulesBlock, lawEnabled } from '../../../shared/rules';
+import { readRulesFile, userRulesPath } from '../context/rules-files';
+import {
+  ProjectMemory,
+  buildMemoryBlock,
+  memoryIdleRule,
+  memoryUpkeepRules,
+  readProjectMemory
+} from '../../project/project-memory';
 import { ProjectDesign, readProjectDesign, writeProjectDesign } from '../../project/design-store';
 import { DESIGN_PROFILES, DesignStyle, buildDesignBrief, designQuestion } from '../../../shared/design-profiles';
+import {
+  recommendedStyleFor,
+  styleRecommendation,
+  isUiWorkRequest,
+  isContinuationPrompt,
+  isSmallTalkOnly
+} from '../../project/style-recommender';
 import { logService } from '../../logging/log-service';
 import { transcriptToConversation } from './session-history';
 import { usageService, calculateCost, findModel } from '../usage/usage-service';
@@ -69,6 +95,51 @@ interface PendingApproval {
 
 const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'create_file', 'delete_file', 'move_file', 'git_commit']);
 
+/**
+ * How to answer a message that asks for nothing.
+ *
+ * Written as an explicit instruction because every other line of the prompt
+ * points the other way: "analyze before executing", "check your work against the
+ * design profile", "end every task by updating the project memory". A model given
+ * those and a greeting will look for the task in it, and finding none will invent
+ * one — usually "summarise this project" — which is a lot of tool calls and a
+ * wall of text in reply to "สวัสดีครับ".
+ *
+ * It also names the two things that most often leaked into those replies: an
+ * unrequested survey, and a list of jobs offered as "what I can do next".
+ */
+function smallTalkDirective(language: 'th' | 'en'): string {
+  return language === 'th'
+    ? `
+## ข้อความนี้ไม่ใช่งาน
+ผู้ใช้ทักทายหรือพูดรับทราบเฉย ๆ ตอบตามที่เขาพูดใน 1–3 ประโยค และ:
+- ห้ามเรียกเครื่องมือใด ๆ (ไม่ต้อง git status ไม่ต้องอ่านไฟล์ ไม่ต้องลิสต์โฟลเดอร์)
+- ห้ามสำรวจหรือสรุปภาพรวมโปรเจกต์ เพราะไม่มีใครขอ
+- ห้ามเสนอแผนงานหรือรายการงานที่ "ทำได้ต่อ" — ถ้าอยากรู้ ให้ถามสั้น ๆ 1 ประโยค
+- ถ้าเป็นการทักทาย ให้ทักตอบ แล้วถามว่าอยากให้ทำอะไรต่อ`
+    : `
+## This message is not a task
+The user greeted you or acknowledged something. Answer in one to three sentences, and:
+- Do not call any tool (no git status, no reading files, no listing folders)
+- Do not survey or summarise the project — nobody asked for it
+- Do not offer a plan or a list of work you could do next — if you want to know, ask one short question
+- If it is a greeting, greet back and ask what they would like to work on`;
+}
+
+/**
+ * Shown when a tool call arrives on a run that was given no tools at all.
+ *
+ * The prompt already says "do not call any tool"; that is a request, and a model
+ * leaning on its cached tool schema can ignore it. The engine therefore also
+ * leaves the tool list out of the request, and refuses anything that comes back
+ * anyway, so the ceiling is the harness rather than the model's good behaviour.
+ */
+function withheldToolsNotice(language: 'th' | 'en'): string {
+  return language === 'th'
+    ? 'ข้อความนี้ไม่ใช่งาน จึงไม่มีการเปิดเครื่องมือให้ใช้ และไม่มีการรันเครื่องมือนี้'
+    : 'This message was not a task, so no tools were offered and this call was refused.';
+}
+
 /** Upper bound on stored timeline items, so a very long run cannot bloat the transcript. */
 const MAX_TRANSCRIPT_ITEMS = 400;
 const TRANSCRIPT_FLUSH_MS = 800;
@@ -80,13 +151,36 @@ export class AgentRuntime {
   private pendingPlanResolver: ((decision: PlanDecision) => void) | null = null;
   /** Waiting chooser for "which style should this project use" (spec §39). */
   private pendingDesignResolver: (() => void) | null = null;
+  /** True while the current run is a continuation of earlier work. */
+  private isContinuationRun = false;
+  /**
+   * True for the length of a run whose message was not a task (a greeting, a
+   * thank-you). Set once per run, from the same verdict the composer uses.
+   *
+   * It is deliberately more than "the tools are missing". Such a run is an
+   * *answer*: no tools, no plan branch, no build step list, no completion report,
+   * no "what next" chips. Dressing a greeting as a build run was the rest of the
+   * over-answer — the survey was only the part that could be seen in the text.
+   */
+  private answerOnly = false;
   private pendingDesignProject: string | null = null;
+  /** Waiting question card: the run is parked until the user answers. */
+  private pendingQuestionResolver: ((answer: QuestionAnswer) => void) | null = null;
   /** Resolver for the step-by-step gate between build steps (spec §35). */
   private pendingStepResolver: ((decision: PlanStepDecision) => void) | null = null;
   private pendingApprovals = new Map<string, PendingApproval>();
   private sessionApprovals = new Set<string>();
   private currentTaskPrompt = '';
   private currentProjectPath = '';
+  /**
+   * Whether *this request* asked for the project to be destroyed.
+   *
+   * Read from the user's own message by `destructiveRequested`, never from the
+   * model's account of it: the law is "never delete the project unless you were
+   * told", and the only trustworthy record of what the user said is their
+   * message. It stays false unless they said it in so many words.
+   */
+  private destructiveIntent = false;
   private currentMode: AgentMode = 'build';
   private currentSessionId = '';
   private currentProviderId = '';
@@ -96,6 +190,8 @@ export class AgentRuntime {
   private runAffectedFiles = new Set<string>();
   /** Builds/tests this run actually executed, for the completion summary (§88). */
   private runValidations: { command: string; ok: boolean }[] = [];
+  /** Every file change this run produced, for the end-of-run file card. */
+  private runFileChanges: FileChange[] = [];
   /** Live transcript of the current session, flushed to disk while it runs. */
   private sessionTimeline: AgentTimelineItem[] = [];
   private sessionTodos: AgentTodo[] = [];
@@ -123,21 +219,15 @@ export class AgentRuntime {
   private cancelled = false;
   /**
    * Why the current run stopped. The closing note in `run()` reads this so that
-   * a run can never end silently — cancelled, out of budget and failed all say
-   * so in the timeline (spec §84).
+   * a run can never end silently — cancelled, hit its token ceiling and failed
+   * all say so in the timeline (spec §84).
    */
   private stopReason: 'none' | 'completed' | 'cancelled' | 'budget' | 'error' = 'none';
-  /** Set once the budget message has been shown, so it is not repeated per call. */
-  private budgetStopAnnounced = false;
   /** Token accounting for the live meter and the per-run ceiling. */
   private runTokens = 0;
   private tokensSaved = 0;
   private lastPromptTokens = 0;
   private tokenMeterAnnounced = 0;
-  /** Cached budget verdict, so the hot path does not re-aggregate usage. */
-  private budgetCache: { exceeded: boolean; warn: boolean } | null = null;
-  private budgetCacheAt = 0;
-  private autoThriftAnnounced = false;
 
   /**
    * "/thrift" is a real switch, not a sentence in the prompt.
@@ -154,7 +244,7 @@ export class AgentRuntime {
   /** How many tokens of conversation a single request may carry. */
   private promptBudget(): number {
     const settings = appStore.getSettings();
-    if (this.thriftLimits()) return Math.min(settings.contextTokenBudget || 48_000, 20_000);
+    if (this.thriftActive()) return Math.min(settings.contextTokenBudget || 48_000, 20_000);
     return settings.contextTokenBudget || 48_000;
   }
 
@@ -162,7 +252,7 @@ export class AgentRuntime {
   private runTokenCap(): number {
     const settings = appStore.getSettings();
     const configured = settings.runTokenBudget || 0;
-    if (this.thriftLimits()) return configured > 0 ? Math.min(configured, 150_000) : 150_000;
+    if (this.thriftActive()) return configured > 0 ? Math.min(configured, 150_000) : 150_000;
     return configured;
   }
 
@@ -199,6 +289,13 @@ export class AgentRuntime {
     const fallback = settings.designStyle === 'ask' ? 'minimal' : settings.designStyle;
 
     if (!chosen) {
+      // A continuation run reaches here only when the style is genuinely unset
+      // AND asking is disabled; it must never see the "ask the user"
+      // instruction, which would make the model stop and ask exactly what the
+      // user told it not to.
+      if (this.isContinuationRun) {
+        return isUiWork ? `\n\n${buildDesignBrief(fallback, language)}` : '';
+      }
       // The user asked to be asked: one short question beats a page they did not
       // want, and the answer is remembered for this project afterwards.
       if (isUiWork && settings.askDesignBeforeUiWork !== false) {
@@ -228,8 +325,7 @@ export class AgentRuntime {
         cap: this.runTokenCap(),
         saved: this.tokensSaved,
         promptTokens: this.lastPromptTokens,
-        thrift: this.thriftLimits(),
-        autoThrift: !this.thriftActive() && this.thriftLimits()
+        thrift: this.thriftActive()
       },
       language
     });
@@ -255,7 +351,7 @@ export class AgentRuntime {
 
   constructor() {
     // The registry reaches back into the runtime for delegation, because the
-    // runtime owns the provider connection, the budget and the approval gate.
+    // runtime owns the provider connection, the token ceiling and the approval gate.
     toolRegistry.setSubagentRunner((args, projectPath) => this.runSubagentTool(args, projectPath));
   }
 
@@ -322,6 +418,12 @@ export class AgentRuntime {
       this.pendingDesignResolver = null;
       this.pendingDesignProject = null;
     }
+    if (this.pendingQuestionResolver) {
+      // Cancelling must not leave the run waiting on a card that will never be
+      // answered; `skipped` is what the model is told the user did.
+      this.pendingQuestionResolver({ answers: [], skipped: true });
+      this.pendingQuestionResolver = null;
+    }
     for (const [, pending] of this.pendingApprovals) {
       pending.resolve('rejected');
     }
@@ -383,42 +485,6 @@ export class AgentRuntime {
   }
 
   /**
-   * Does this project already have an interface?
-   *
-   * Bounded and short-circuiting: it walks a few conventional roots three levels
-   * deep and stops at the first component or stylesheet, so the cost is a couple
-   * of directory reads rather than a scan of the repository. The answer decides
-   * whether an unnamed UI task still needs the style question.
-   */
-  private projectHasUiSource(projectPath: string): boolean {
-    const uiFile = /\.(tsx|jsx|vue|svelte|astro|css|scss|sass|less)$/i;
-    const seen = new Set<string>();
-    const walk = (directory: string, depth: number): boolean => {
-      if (depth > 3 || seen.has(directory)) return false;
-      seen.add(directory);
-      let entries: fs.Dirent[];
-      try {
-        entries = fs.readdirSync(directory, { withFileTypes: true });
-      } catch {
-        return false;
-      }
-      for (const entry of entries) {
-        if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-        if (entry.isFile() && uiFile.test(entry.name)) return true;
-      }
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-        if (walk(path.join(directory, entry.name), depth + 1)) return true;
-      }
-      return false;
-    };
-    return ['src', 'app', 'pages', 'components', 'lib', ''].some((root) =>
-      walk(path.join(projectPath, root), 0)
-    );
-  }
-
-  /**
    * Raises the style chooser and waits for the answer.
    *
    * The user should not have to type their design preference into every prompt,
@@ -429,11 +495,16 @@ export class AgentRuntime {
   private askDesignStyle(
     mainWindow: BrowserWindow,
     projectPath: string,
-    language: 'th' | 'en'
+    language: 'th' | 'en',
+    evidence: { prompt: string; projectPath: string }
   ): Promise<boolean> {
     return new Promise((resolve) => {
       this.pendingDesignProject = projectPath;
       this.pendingDesignResolver = () => resolve(true);
+      // The AI's own lean, shown on the card as a pre-selected badge: most
+      // users want a recommendation they can accept in one click, not four
+      // equal choices to study.
+      const recommended = recommendedStyleFor(evidence);
       this.sendEvent(mainWindow, {
         id: `design_card_${Date.now()}`,
         type: 'design',
@@ -442,7 +513,7 @@ export class AgentRuntime {
           language === 'th'
             ? 'เลือกครั้งเดียวแล้วจำไว้ให้โปรเจกต์นี้ — ทุกงานที่แตะหน้าจอหลังจากนี้จะยึดสไตล์นี้ให้เอง ไม่ต้องสั่งซ้ำทุกครั้ง'
             : 'Answered once and remembered for this project — every later task that touches the screen follows it, with no need to repeat yourself.',
-        details: { projectPath, language },
+        details: { projectPath, language, recommended, reason: styleRecommendation(recommended, language) },
         timestamp: Date.now()
       });
       this.sendStatus(mainWindow, 'waiting_approval');
@@ -478,6 +549,18 @@ export class AgentRuntime {
     if (!resolver) return false;
     this.pendingStepResolver = null;
     resolver(decision);
+    return true;
+  }
+
+  /**
+   * Answers the question card the run is waiting on. Returns false when nothing
+   * was asked — a stale renderer, or an answer for a card already decided.
+   */
+  answerQuestions(answer: QuestionAnswer): boolean {
+    const resolver = this.pendingQuestionResolver;
+    if (!resolver) return false;
+    this.pendingQuestionResolver = null;
+    resolver(answer);
     return true;
   }
 
@@ -520,6 +603,38 @@ export class AgentRuntime {
     this.send(mainWindow, IPC_CHANNELS.AGENT_EVENT, { type: 'file_change', change });
   }
 
+  /**
+   * The next-move chips under a finished run (spec §5).
+   *
+   * Grounded in what this run actually did — a failed build asks to be fixed,
+   * an open todo asks to be continued, a clean change asks to be reviewed or
+   * committed — which is what makes a chip worth clicking rather than furniture.
+   * Sent through the agent event stream but deliberately *not* recorded in the
+   * transcript: it is an affordance for the person on screen, not part of the
+   * conversation a replay should show. Fired from `run()`'s finally so every
+   * exit path — completed, failed, cancelled — offers a way onward.
+   */
+  private sendFollowUpSuggestions(mainWindow: BrowserWindow): void {
+    // No "what next" chips on an answer: with nothing done in the run, every
+    // chip left to offer is "explore this project" or "suggest next tasks" — the
+    // unrequested work list, in chip form this time.
+    if (this.answerOnly) return;
+    try {
+      const suggestions = buildFollowUpSuggestions({
+        language: appStore.getSettings().language,
+        changedFiles: Array.from(this.runAffectedFiles),
+        validations: this.runValidations,
+        todos: this.sessionTodos,
+        unfinished: this.stopReason === 'budget',
+        retryPrompt: this.status === 'failed' ? this.currentTaskPrompt : undefined
+      });
+      if (suggestions.length === 0) return;
+      this.send(mainWindow, IPC_CHANNELS.AGENT_EVENT, { type: 'suggestions', suggestions });
+    } catch {
+      // A chip that cannot be built must never take the closing note down with it.
+    }
+  }
+
   // -------------------------------------------------------- plan scoping
 
   /**
@@ -536,6 +651,87 @@ export class AgentRuntime {
       return `${header}\nThe user approved the FIRST step only: implement step 1, then stop and report. Do not begin step 2 or any later step.`;
     }
     return `${header}\nPlease proceed with the implementation in Build Mode now.`;
+  }
+
+  /**
+   * Asks the user, and waits.
+   *
+   * The card is the only artifact on screen: it carries the questions, and the
+   * answer is written back onto the very same transcript item, so replaying a
+   * session shows what was decided instead of a question that looks unanswered.
+   * The run parks in `waiting_approval`, which is exactly what it is — work
+   * stopped, waiting on a person.
+   */
+  private async askUser(
+    mainWindow: BrowserWindow,
+    questions: AgentQuestion[],
+    language: 'th' | 'en'
+  ): Promise<QuestionAnswer> {
+    const id = `q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    this.sendEvent(mainWindow, {
+      id,
+      type: 'question',
+      title: questionCardTitle(language),
+      content:
+        language === 'th'
+          ? 'เลือกคำตอบด้านล่าง แล้วกด “ตอบ” เพื่อให้งานเดินต่อ'
+          : 'Pick your answers below, then press Answer to let the work continue.',
+      details: { questions, language },
+      timestamp: Date.now()
+    });
+    this.sendStatus(mainWindow, 'waiting_approval');
+
+    const answer = await new Promise<QuestionAnswer>((resolve) => {
+      this.pendingQuestionResolver = resolve;
+    });
+
+    this.pendingQuestionResolver = null;
+    this.recordQuestionAnswer(id, answer);
+    if (!this.cancelled) this.sendStatus(mainWindow, 'running');
+    return answer;
+  }
+
+  /** The answer, attached to the card that asked the question. */
+  private recordQuestionAnswer(id: string, answer: QuestionAnswer): void {
+    const item = this.sessionTimeline.find((entry) => entry.id === id);
+    if (!item) return;
+    item.details = { ...(item.details || {}), answer };
+    this.scheduleTranscriptFlush();
+  }
+
+  /**
+   * The `ask_question` tool.
+   *
+   * Answered here rather than in the tool registry because only the runtime can
+   * reach the window, and only the runtime owns the waiting/aborted lifecycle
+   * of a parked run. Returns null for every other tool, so callers can use it as
+   * "is this a question?" without repeating the name check.
+   */
+  private async handleQuestionCall(
+    mainWindow: BrowserWindow,
+    toolCall: ToolCall,
+    language: 'th' | 'en'
+  ): Promise<ToolResult | null> {
+    if (toolCall.name !== 'ask_question') return null;
+
+    const rawArgs = (toolCall.args || {}) as Record<string, unknown>;
+    const questions = normalizeQuestions(rawArgs.questions ?? rawArgs.question).filter(isAnswerable);
+
+    if (questions.length === 0) {
+      return {
+        toolCallId: toolCall.id,
+        success: false,
+        error:
+          'ask_question needs at least one question with a "question" string, and 2-4 options per question.'
+      };
+    }
+
+    const answer = await this.askUser(mainWindow, questions, language);
+    return {
+      toolCallId: toolCall.id,
+      success: true,
+      output: formatAnswersForModel(language, questions, answer)
+    };
   }
 
   /**
@@ -571,33 +767,8 @@ export class AgentRuntime {
   }
 
   /**
-   * The budget stop, spelled out. The user asked for work that then stopped on
-   * a spending limit; the numbers, where to change them, and the fact that the
-   * work so far is kept all have to be in the timeline for that to make sense.
-   */
-  private budgetStopItem(language: 'th' | 'en'): AgentTimelineItem {
-    const budget = usageService.summary(this.currentSessionId).budget;
-    const spentToday = budget.dailySpent.toFixed(2);
-    const limit = budget.daily;
-    const nextStep =
-      language === 'th'
-        ? 'งานที่ทำไปแล้วถูกบันทึกไว้ทั้งหมด ไปที่ การตั้งค่า → การใช้งานและงบประมาณ เพื่อเพิ่มวงเงิน แล้วส่งข้อความอีกครั้งเพื่อทำต่อจากจุดนี้'
-        : 'Everything done so far is saved. Raise the limit in Settings → Usage & Budget, then send another message to continue from here.';
-    return {
-      id: `budget_stop_${Date.now()}`,
-      type: 'error',
-      title: language === 'th' ? 'หยุดเพราะถึงขีดจำกัดงบประมาณ' : 'Stopped: budget limit reached',
-      content:
-        language === 'th'
-          ? `ใช้ไป $${spentToday} จากวงเงิน $${limit} ต่อวัน จึงหยุดที่ขั้นตอนนี้ (โทเคนและไฟล์ที่แก้แล้วยังอยู่ครบ)\n${nextStep}`
-          : `Spent $${spentToday} of the $${limit} daily budget, so the run stopped at this step (tokens and file changes are intact).\n${nextStep}`,
-      timestamp: Date.now()
-    };
-  }
-
-  /**
-   * No run ends without saying so. A cancelled, out-of-budget or failed run used
-   * to leave the transcript hanging on whatever the last tool printed — which is
+   * No run ends without saying so. A cancelled, capped or failed run used to
+   * leave the transcript hanging on whatever the last tool printed — which is
    * indistinguishable from "nothing happened" (spec §84).
    */
   private emitStopNote(mainWindow: BrowserWindow, language: 'th' | 'en'): void {
@@ -611,8 +782,8 @@ export class AgentRuntime {
         ? `หยุดตามที่คุณสั่งครับ งานที่ทำเสร็จแล้ว ${changed} ไฟล์ถูกบันทึกไว้ \nส่งข้อความใหม่ในเซสชันนี้เพื่อทำต่อจากจุดเดิมได้เลย`
         : `Stopped at your request. ${changed} file(s) already changed are saved.\nSend another message in this session to continue from here.`,
       budget: th
-        ? 'หยุดเพราะถึงขีดจำกัดงบประมาณ — ดูรายละเอียดด้านบน แล้วเพิ่มวงเงินที่ การตั้งค่า → การใช้งานและงบประมาณ'
-        : 'Stopped by the spending limit — see above, then raise it in Settings → Usage & Budget.',
+        ? 'หยุดเพราะถึงงบโทเคนของงานนี้ — ดูรายละเอียดด้านบน แล้วส่งข้อความ "ทำต่อจากที่ค้างอยู่" เพื่อไปต่อ'
+        : 'Stopped at this run\'s token ceiling — see above, then send "continue where you left off" to carry on.',
       error: th
         ? `การทำงานหยุดเพราะข้อผิดพลาดของผู้ให้บริการ งานที่ทำไปแล้ว ${changed} ไฟล์ถูกเก็บไว้ \nแก้สาเหตุ (คีย์/โมเดล/เครือข่าย) แล้วส่งข้อความอีกครั้งเพื่อทำต่อ`
         : `The run stopped on a provider error. ${changed} file(s) were kept.\nFix the cause (key, model, network), then send another message to continue.`
@@ -620,7 +791,7 @@ export class AgentRuntime {
 
     const titles: Record<'cancelled' | 'budget' | 'error', [string, string]> = {
       cancelled: ['หยุดการทำงานแล้ว', 'Run stopped'],
-      budget: ['หยุดเพราะงบประมาณ', 'Stopped by budget'],
+      budget: ['หยุดเพราะงบโทเคน', 'Stopped: token ceiling'],
       error: ['การทำงานสิ้นสุดด้วยข้อผิดพลาด', 'Run ended with an error']
     };
 
@@ -666,6 +837,40 @@ export class AgentRuntime {
       this.lastPermissionMode = mode;
     }
     return mode;
+  }
+
+  /**
+   * What the guardrails need to judge one tool call: the folder the run was
+   * given, and whether the user asked for destruction in their own words.
+   */
+  private permissionContext(language: 'th' | 'en') {
+    return {
+      projectPath: this.currentProjectPath,
+      explicitDestructiveRequest: this.destructiveIntent,
+      language,
+      disabledLaws: this.disabledLaws()
+    };
+  }
+
+  /**
+   * The standing laws this user switched off.
+   *
+   * Read from settings rather than cached at construction: the switch takes
+   * effect on the next tool call, the same way the permission mode does, and a
+   * copied array would keep enforcing a law the user just turned off.
+   */
+  private disabledLaws(): string[] {
+    try {
+      const laws = appStore.getSettings().disabledLaws;
+      return Array.isArray(laws) ? laws : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Is this law in force for this run? */
+  private lawOn(id: string): boolean {
+    return lawEnabled(id, this.disabledLaws());
   }
 
   private errorItem(title: string, content: string): AgentTimelineItem {
@@ -795,6 +1000,17 @@ export class AgentRuntime {
     // Refuse to fire a request that cannot succeed for a reason we already know.
     // Each branch names the fix instead of surfacing a 401 or a hang later.
     if (config) {
+      // A key that is stored but no longer decryptable is a different problem
+      // from having no key at all: sending the user to an empty field they have
+      // already filled in reads as the app forgetting their work.
+      if (config.keyUnreadable) {
+        return {
+          error:
+            language === 'th'
+              ? `คีย์ที่บันทึกไว้ของ ${config.name} ใช้ไม่ได้แล้ว (ตัวเข้ารหัสของระบบเปลี่ยน) — ไปที่ Settings → AI Providers แล้ววางคีย์อีกครั้ง`
+              : `The saved key for ${config.name} can no longer be read (the OS keychain changed) — open Settings → AI Providers and paste it again.`
+        };
+      }
       if (config.requiresApiKey && !config.apiKey) {
         return {
           error:
@@ -955,8 +1171,8 @@ export class AgentRuntime {
     const budget = this.promptBudget();
     const trimmed = compressForBudget(request.messages, {
       maxTokens: budget,
-      maxToolChars: this.thriftLimits() ? 800 : 2500,
-      keepRecent: this.thriftLimits() ? 4 : 8
+      maxToolChars: this.thriftActive() ? 800 : 2500,
+      keepRecent: this.thriftActive() ? 4 : 8
     });
     if (trimmed.dropped > 0 || trimmed.truncated > 0 || trimmed.argumentCharsSaved > 0) {
       request = { ...request, messages: trimmed.messages };
@@ -1093,86 +1309,6 @@ export class AgentRuntime {
 
     if (window_) this.send(window_, IPC_CHANNELS.USAGE_EVENT, summary);
     this.emitTokenStats(window_ ?? this.activeWindow, appStore.getSettings().language);
-
-    // Once per run, not once per provider call. This fires while the budget is
-    // exceeded, so announcing it every time buried the run's actual work under
-    // a column of identical rows and made the timeline unreadable.
-    if (window_ && summary.budget.warn && summary.budget.hardStop && summary.budget.exceeded) {
-      if (!this.budgetStopAnnounced) {
-        this.budgetStopAnnounced = true;
-        this.sendEvent(
-          window_,
-          this.errorItem(
-            appStore.getSettings().language === 'th' ? 'งบประมาณถูกใช้เกิน' : 'Budget exceeded',
-            appStore.getSettings().language === 'th'
-              ? `ค่าใช้จ่ายวันนี้ $${summary.budget.dailySpent.toFixed(4)} / งบ $${summary.budget.daily} — หยุดทำงานอัตโนมัติ`
-              : `Today's spend $${summary.budget.dailySpent.toFixed(4)} of $${summary.budget.daily} budget — stopping automatically.`
-          )
-        );
-      }
-    } else if (!summary.budget.exceeded) {
-      // Back under the limit: a later crossing should be able to speak again.
-      this.budgetStopAnnounced = false;
-    }
-  }
-
-  /**
-   * The budget picture, read at most once every few seconds.
-   *
-   * `usageService.summary` aggregates the usage table, and both the thrift
-   * decision and the hard stop need it — asking per provider call would put a
-   * query in the hot path for a number that only moves by cents per call.
-   */
-  private budgetState(): { exceeded: boolean; warn: boolean } {
-    const now = Date.now();
-    if (!this.budgetCache || now - this.budgetCacheAt > 4000) {
-      const budget = usageService.summary(this.currentSessionId).budget;
-      this.budgetCache = { exceeded: budget.exceeded, warn: budget.warn };
-      this.budgetCacheAt = now;
-    }
-    return this.budgetCache;
-  }
-
-  private budgetBlocks(): boolean {
-    if (!appStore.getSettings().budgetHardStop) return false;
-    return this.budgetState().exceeded;
-  }
-
-  /**
-   * Thrift limits, engaged by the user or by the budget itself.
-   *
-   * Warning alone never saved anyone money: the run kept sending the same
-   * oversized prompts until the money was gone, which is exactly the complaint
-   * this answers. So once spending passes the warning threshold, the engine
-   * switches itself to the cheaper limits for the rest of the run — smaller
-   * prompt budget, smaller tool payloads, fewer steps — and says so, instead of
-   * reporting the overspend after the fact.
-   */
-  private thriftLimits(): boolean {
-    if (this.thriftActive()) return true;
-    if (!appStore.getSettings().autoThriftOnBudget) return false;
-    return this.budgetState().warn;
-  }
-
-  /** Announces the automatic switch once, with the numbers that caused it. */
-  private announceAutoThrift(mainWindow: BrowserWindow, language: 'th' | 'en'): void {
-    if (this.thriftActive() || this.autoThriftAnnounced) return;
-    if (!appStore.getSettings().autoThriftOnBudget) return;
-    if (!this.budgetState().warn) return;
-    this.autoThriftAnnounced = true;
-    const budget = usageService.summary(this.currentSessionId).budget;
-    this.sendEvent(mainWindow, {
-      id: `autothrift_${Date.now()}`,
-      type: 'thinking',
-      title: language === 'th' ? 'โหมดประหยัดโทเคนทำงานอัตโนมัติ' : 'Thrift engaged automatically',
-      content:
-        language === 'th'
-          ? `ค่าใช้จ่ายใกล้งบประมาณ (วันนี้ $${budget.dailySpent.toFixed(2)}/$${budget.daily} · เดือนนี้ $${budget.monthlySpent.toFixed(2)}/$${budget.monthly}) ` +
-            `จึงลดขนาดคำขอ ผลลัพธ์เครื่องมือ และจำนวนขั้นลงให้เอง — กลับไปใช้ค่าปกติได้ที่ Settings → การใช้งานและงบประมาณ`
-          : `Spending is near the budget (today $${budget.dailySpent.toFixed(2)}/$${budget.daily} · month $${budget.monthlySpent.toFixed(2)}/$${budget.monthly}), ` +
-            `so request size, tool output and step count were reduced automatically. Change this in Settings → Usage & budget.`,
-      timestamp: Date.now()
-    });
   }
 
   // ------------------------------------------------------------ checkpoints
@@ -1230,12 +1366,28 @@ export class AgentRuntime {
       // leaves a transcript that says the run is over, *and* tells the user what
       // stopped it (spec §84).
       this.emitStopNote(mainWindow, appStore.getSettings().language);
+      // After the closing note, so the chips appear underneath it rather than
+      // being scrolled away by it.
+      this.sendFollowUpSuggestions(mainWindow);
       if (this.transcriptTimer) {
         clearTimeout(this.transcriptTimer);
         this.transcriptTimer = null;
       }
       this.writeTranscript(true);
     }
+  }
+
+  /**
+   * The tool list for one request — or nothing at all.
+   *
+   * A message that is not a task is sent with no tools: a request that carries
+   * no tool schema cannot turn into a file read, a terminal command or a survey,
+   * whichever way the model was leaning. The prompt-level directive above asks
+   * the model to hold back; leaving the list out does not depend on it agreeing.
+   */
+  private toolDefinitionsFor(mode: 'plan' | 'build'): ReturnType<typeof toolRegistry.getToolDefinitions> | undefined {
+    if (this.answerOnly) return undefined;
+    return toolRegistry.getToolDefinitions(mode);
   }
 
   private async runInternal(mainWindow: BrowserWindow, args: AgentRunArgs): Promise<void> {
@@ -1245,14 +1397,15 @@ export class AgentRuntime {
     this.abortController = new AbortController();
     const token = ++this.runToken;
     this.cancelled = false;
+    this.isContinuationRun = isContinuationPrompt(prompt);
+    // Reset before anything can read it: one greeting must not mute the tools of
+    // the next, real request in this session.
+    this.answerOnly = false;
     this.stopReason = 'none';
     this.runTokens = 0;
     this.tokensSaved = 0;
     this.lastPromptTokens = 0;
     this.tokenMeterAnnounced = 0;
-    this.autoThriftAnnounced = false;
-    this.budgetCache = null;
-    this.budgetCacheAt = 0;
     this.lastPermissionMode = null;
     this.pendingApprovals.clear();
     this.sessionApprovals.clear();
@@ -1274,6 +1427,7 @@ export class AgentRuntime {
     if (sessionId !== this.currentSessionId) {
       this.runAffectedFiles.clear();
       this.runValidations = [];
+      this.runFileChanges = [];
     }
     // Start from an empty trail and let a stored transcript replace it. Without
     // the reset a brand new session inherited the previous run's timeline and
@@ -1325,6 +1479,11 @@ export class AgentRuntime {
     });
 
     const projectRules = contextEngine.loadProjectRules(projectPath);
+    // The user's own words decide whether a destructive request is allowed at
+    // all. Reading it here — once, from the request that started this run —
+    // means a model cannot authorise its own deletion by describing it as
+    // something the user wanted.
+    this.destructiveIntent = destructiveRequested(prompt);
     const mentionedContext = await this.buildMentionContext(prompt, projectPath);
 
     // Mission is persistent context for this session (spec §40). It goes into
@@ -1362,55 +1521,76 @@ export class AgentRuntime {
       : readProjectMemory(projectPath);
     let design = readProjectDesign(projectPath);
     const memoryBlock = buildMemoryBlock(memory as ProjectMemory, language);
-    // A product brief produces a screen even when it never says "UI", so the
-    // words that mean "build a thing people look at" count here too.
-    const looksLikeUiWork =
-      /\b(ui|ux|page|screen|landing|hero|layout|design|style|component|button|form|dashboard|website|web app|app|admin|storefront|saas|navbar|menu|modal|card|theme|font)\b|สี|ดีไซน์|หน้า|ปุ่ม|ฟอร์ม|เมนู|การ์ด|ธีม|ฟอนต์|รูปแบบ|โปรแกรม|แอป|เว็บ|ระบบ|เว็บไซต์/i.test(
-        prompt
-      );
     // Ask about the style before writing any UI in a project that has not chosen
     // one. The user asked to be asked instead of having a look invented for them,
     // and answered once it is remembered — so this costs one question per project,
     // not one per prompt.
     //
-    // The trigger is wider than "the prompt says UI", because the prompts that
-    // produce the worst screens name no interface at all — "ทำโปรแกรมอสังหา" is a
-    // product brief, and a project that already has screens has a look to keep
-    // consistent even when this particular task is a query. A task with no design
-    // in it, in a project with no interface, is left alone: that is the case where
-    // the question would only be in the way.
+    // The decision is made on the *prompt*: is this an order to build or change a
+    // screen (a product brief counts — "ทำโปรแกรมอสังหา" names no interface and
+    // produces one). It used to also accept "the project has UI files", which in
+    // any app of this size meant every message — a greeting included — stopped for
+    // a style question the user had not asked for. Small talk, questions and
+    // continuations ("ทำต่อ", "finish it") never raise it: they carry no new
+    // design decision, and asking on them was the loudest complaint of all.
+    const looksLikeUiWork = isUiWorkRequest(prompt);
     const shouldAskDesign =
       this.currentMode !== 'plan' &&
       design.style === 'ask' &&
       appStore.getSettings().askDesignBeforeUiWork !== false &&
-      (looksLikeUiWork || this.projectHasUiSource(projectPath));
+      looksLikeUiWork;
 
     if (shouldAskDesign) {
-      const answered = await this.askDesignStyle(mainWindow, projectPath, language);
+      const answered = await this.askDesignStyle(mainWindow, projectPath, language, { prompt, projectPath });
       if (this.cancelled) return;
       if (answered) design = readProjectDesign(projectPath);
     }
 
     const designBlock = this.designBlock(design, looksLikeUiWork, language);
+    // A greeting is answered, not worked on. Left to itself the agent reads
+    // "always analyze before executing" and the memory upkeep rule as one
+    // standing order to survey the project, so a "สวัสดีครับ" came back as a
+    // table of the folder layout and a list of jobs nobody asked for. The
+    // classification is the same one that decides whether to raise the style
+    // card — a message with no order in it — and it is stated in the prompt,
+    // because the model cannot be relied on to know how much answer is enough.
+    // The verdict decides the mode of the run, not just its tone. There is no
+    // build to build and no plan to plan in "สวัสดีครับ", so the run is marked as
+    // an answer: the tools are withheld, the plan branch is skipped, and the run
+    // reports itself as neither. Asking the composer to say so too is the other
+    // half of the same decision.
+    const smallTalk = isSmallTalkOnly(prompt);
+    this.answerOnly = smallTalk;
+    const smallTalkBlock = smallTalk ? smallTalkDirective(language) : '';
+    // One law book, in every prompt, whatever provider is answering: the laws
+    // the engine enforces, then the user's own rules, then the project's. It is
+    // the same text the RULES card shows, so what the user reads is what the
+    // model was told.
+    const rulesBlock = formatRulesBlock({
+      projectRules,
+      userRules: readRulesFile(userRulesPath(appStore.getDataDir())) ?? '',
+      language,
+      disabledLaws: this.disabledLaws()
+    });
 
     const systemPrompt = `You are D4IDE, an elite autonomous AI software engineering agent.
 Operating System: ${process.platform === 'win32' ? 'Windows' : process.platform}
 Current Project Path: ${projectPath}
 Working directory for all paths: ${projectPath}
 User Interface Language: ${language === 'th' ? 'Thai (ไทย)' : 'English'}
-${projectRules ? `\nProject Rules & Guidelines:\n${projectRules}\n` : ''}
 Instructions:
 1. Always analyze before executing file changes.
 2. Use tools to read files, search, list directories, and execute terminal commands.
 3. Keep file modifications focused and targeted; prefer edit_file over rewriting whole files.
-4. If asked in Plan Mode, produce a structured implementation plan with clear steps, affected files, and risk.
-5. In Build Mode, follow through and implement the complete task autonomously. Run build or tests when appropriate.
+4. If asked in Plan Mode, produce a structured implementation plan with clear steps, affected files, and risk. If the request leaves a real decision open that would change what you build, call ask_question first instead of assuming.
+5. In Build Mode, follow through and implement the complete task autonomously. Run build or tests when appropriate. When a detail that would change what you write is genuinely missing (which store, which provider, which currency, which folder, how far this round goes), call ask_question once with 2-4 options per question rather than guessing; when the request is already complete, do not ask anything. When the user asks to continue (Thai "ทำต่อ" or similar), resume the existing work using the answers and files already recorded — never re-ask a question that was already answered (style, stack, scope), and never restart from scratch.
 6. Write every message the user reads — including the final summary — in ${language === 'th' ? 'Thai (ไทย)' : 'English'}, whatever language the tool output or earlier messages use. Keep code, identifiers, file paths and quoted command output verbatim.
-7. Anything that changes what the user sees is not done until you have looked at it: start the dev server in the background, browser_navigate to the page, browser_screenshot it, read browser_inspect and browser_console, and then judge the screenshot against the design profile — spacing, alignment, hierarchy, contrast, overflow, empty states. Fix what the render reveals and take a second screenshot before reporting. A screen you have not seen renders is not finished, and "it should look good" is not evidence.
+7. Anything that changes what the user sees is not done until you have looked at it: start the dev server in the background, browser_navigate to the page, browser_screenshot it, read browser_inspect and browser_console, and then judge the screenshot against the design profile — spacing, alignment, hierarchy, contrast, overflow, empty states. Fix what the render reveals and take a second screenshot before reporting. A screen you have not seen renders is not finished, and "it should look good" is not evidence. Every screen you build is Mobile UI and Responsive on all devices by default: design mobile-first (360px) up to desktop (1440px+), never fix a width in px, never let a table or grid overflow a small screen, and verify one narrow-viewport screenshot before reporting.
 10. Check your own work against the design profile like a reviewer would: does every colour, radius, shadow and gap come from the tokens? Is the Thai text free of clipped tone marks, is anything overflowing its box, are focus and hover states visible? Fix these before the user has to point them out.
 8. Never run a dev server or watch command in the foreground: call run_terminal with background: true so it keeps running in a terminal while you carry on, and pass its port when you know it. The preview panel opens on the address the server prints — tell the user the address once it is up.
-9. ${memoryUpkeepRules(language)}
-${memoryBlock}${designBlock}
+9. ${smallTalk ? memoryIdleRule(language) : memoryUpkeepRules(language)}
+${smallTalkBlock}${memoryBlock}${designBlock}
+${rulesBlock}
 
 ${tokenDisciplineRules(language)}`;
 
@@ -1469,7 +1649,10 @@ ${tokenDisciplineRules(language)}`;
     let planScope: PlanScope = 'full';
 
     // --- PLAN MODE ---
-    if (mode === 'plan') {
+    // A greeting has no plan in it: planning mode would answer "สวัสดีครับ" with
+    // an inspection loop and an approval card, which is the same overreach as the
+    // project survey, one card later.
+    if (mode === 'plan' && !this.answerOnly) {
       this.sendStatus(mainWindow, 'planning');
       this.sendEvent(mainWindow, {
         id: `plan_start_${Date.now()}`,
@@ -1481,13 +1664,7 @@ ${tokenDisciplineRules(language)}`;
       messages.push({
         id: `p_${Date.now()}`,
         role: 'user',
-        content: `Please inspect the codebase if needed and formulate a clear Implementation Plan for: "${prompt}".
-Provide:
-1. Steps to implement
-2. Affected files
-3. Estimated scope
-4. Risk assessment (Low, Medium, High)
-Return your plan in structured markdown.`,
+        content: this.planningInstruction(prompt, language),
         timestamp: Date.now()
       });
 
@@ -1609,23 +1786,33 @@ Return your plan in structured markdown.`,
     }
 
     // --- BUILD MODE LOOP ---
+    // (An answer-only run comes through here too — the loop is how a reply is
+    // requested — but it carries no tools, so it ends on its first round.)
     this.sendStatus(mainWindow, 'running');
     let stepCount = 0;
     // Cheaper mode means fewer steps, not just a politer prompt.
-    const maxSteps = this.thriftLimits()
+    const maxSteps = this.thriftActive()
       ? Math.min(settings.maxAgentSteps || 30, 12)
       : settings.maxAgentSteps || 30;
     let finished = false;
-    // Automatic thrift is announced on the timeline once, with the figures that
-    // triggered it, so a quietly cheaper run is not a mystery.
-    this.announceAutoThrift(mainWindow, language);
 
-    const liveTodos: AgentTodo[] = [
-      { id: '1', text: language === 'th' ? 'วิเคราะห์ความต้องการ' : 'Analyze requirement', status: 'completed' },
-      { id: '2', text: language === 'th' ? 'ดำเนินการแก้ไขโค้ด' : 'Implement changes', status: 'in_progress' },
-      { id: '3', text: language === 'th' ? 'ตรวจสอบและรันการทดสอบ' : 'Verify & test', status: 'pending' },
-      { id: '4', text: language === 'th' ? 'สรุปผลการทำงาน' : 'Finalize summary', status: 'pending' }
-    ];
+    // The step list is the shape of the work on screen: four build steps for a
+    // task, one row for an answer. A greeting used to raise the same four rows
+    // and tick them off, which claimed build work that never happened.
+    const liveTodos: AgentTodo[] = this.answerOnly
+      ? [
+          {
+            id: '1',
+            text: language === 'th' ? 'ตอบกลับข้อความ (ไม่ใช่งาน)' : 'Answer the message (no task)',
+            status: 'in_progress'
+          }
+        ]
+      : [
+          { id: '1', text: language === 'th' ? 'วิเคราะห์ความต้องการ' : 'Analyze requirement', status: 'completed' },
+          { id: '2', text: language === 'th' ? 'ดำเนินการแก้ไขโค้ด' : 'Implement changes', status: 'in_progress' },
+          { id: '3', text: language === 'th' ? 'ตรวจสอบและรันการทดสอบ' : 'Verify & test', status: 'pending' },
+          { id: '4', text: language === 'th' ? 'สรุปผลการทำงาน' : 'Finalize summary', status: 'pending' }
+        ];
     this.sendTodos(mainWindow, liveTodos);
 
     const maxVerificationRounds = 2;
@@ -1642,31 +1829,20 @@ Return your plan in structured markdown.`,
         return;
       }
 
-      if (this.budgetBlocks()) {
-        // A budget stop used to be a silent `failed`: the run just vanished with
-        // no message, which reads exactly like "I approved everything and nothing
-        // happened". Say what stopped it and how to continue.
-        this.stopReason = 'budget';
-        this.sendEvent(mainWindow, this.budgetStopItem(language));
-        this.sendStatus(mainWindow, 'failed');
-        return;
-      }
-
-      // A ceiling the user can see and predict. Without it, "cheap mode" was a
-      // promise: the run could spend as much as it liked and only the daily
-      // total ever pushed back.
+      // A ceiling the user can see and predict, counted in tokens rather than in
+      // money: without it, "cheap mode" was a promise and a long run could spend
+      // as much as it liked.
       const tokenCap = this.runTokenCap();
       if (tokenCap > 0 && this.runTokens >= tokenCap) {
         this.sendEvent(mainWindow, {
           id: `tokencap_${Date.now()}`,
-          type: 'error',
-          title: language === 'th' ? 'ถึงงบโทเคนของงานนี้' : 'Run token budget reached',
+          type: 'error',            title: language === 'th' ? 'ถึงงบโทเคนของงานนี้' : 'Run token ceiling reached',
           content:
             language === 'th'
-              ? `งานนี้ใช้ไปประมาณ ${this.runTokens.toLocaleString()} โทเคน (งบ ${tokenCap.toLocaleString()}) จึงหยุดตรงนี้ ` +
-                'เพื่อไม่ให้บิลบานปลาย ไฟล์ที่แก้แล้วยังอยู่ครบ — ส่งข้อความ "ทำต่อจากที่ค้างอยู่" เพื่อไปต่อ หรือเพิ่มงบที่ การตั้งค่า → การใช้งานและงบประมาณ'
-              : `This run spent about ${this.runTokens.toLocaleString()} tokens (budget ${tokenCap.toLocaleString()}), so it stopped here ` +
-                'rather than run the bill up. Files already changed are kept — send "continue where you left off" to carry on, or raise the budget in Settings → Usage & Budget.',
+              ? `งานนี้ใช้ไปประมาณ ${this.runTokens.toLocaleString()} โทเคน (เพดาน ${tokenCap.toLocaleString()}) จึงหยุดตรงนี้ ` +
+                'เพื่อไม่ให้บิลบานปลาย ไฟล์ที่แก้แล้วยังอยู่ครบ — ส่งข้อความ "ทำต่อจากที่ค้างอยู่" เพื่อไปต่อ หรือปรับเพดานที่ การตั้งค่า → การใช้งาน'
+              : `This run spent about ${this.runTokens.toLocaleString()} tokens (ceiling ${tokenCap.toLocaleString()}), so it stopped here ` +
+                'rather than run far past it. Files already changed are kept — send "continue where you left off" to carry on, or change the ceiling in Settings → Usage.',
           timestamp: Date.now()
         });
         this.stopReason = 'budget';
@@ -1689,7 +1865,7 @@ Return your plan in structured markdown.`,
           {
             model: modelId,
             messages,
-            tools: toolRegistry.getToolDefinitions('build'),
+            tools: this.toolDefinitionsFor('build'),
             reasoningEffort: settings.reasoningEffort,
             // Same id for every request in this conversation: Go/Zen route and
             // cache per session, and a fresh id per turn would defeat both.
@@ -1727,7 +1903,7 @@ Return your plan in structured markdown.`,
 
           // Saying the same thing three turns running is a loop that costs the
           // same as any other: name it and ask for the remaining work (§39).
-          if (this.ledger.isRepeatingText(assistantText)) {
+          if (this.lawOn('no-loops') && this.ledger.isRepeatingText(assistantText)) {
             const notice = repetitionNotice(language);
             this.sendEvent(mainWindow, {
               id: `repeat_${Date.now()}_${stepCount}`,
@@ -1750,6 +1926,49 @@ Return your plan in structured markdown.`,
           break;
         }
 
+        // Last line of defence. The tools were withheld, so a call here means
+        // the provider answered from its own cached schema or the model simply
+        // ignored the missing list. Either way nothing is executed, nobody is
+        // asked to approve anything, and the run ends on the text it already
+        // produced — the answer to "สวัสดีครับ" stays one or two sentences.
+        if (this.answerOnly) {
+          const notice = withheldToolsNotice(language);
+          for (const tc of pendingToolCalls) {
+            this.sendEvent(mainWindow, {
+              id: `tc_${tc.id}`,
+              type: 'tool_call',
+              title: tc.name,
+              content: JSON.stringify(tc.args, null, 2),
+              toolCall: tc,
+              status: 'failed',
+              timestamp: Date.now()
+            });
+            this.sendEvent(mainWindow, {
+              id: `tr_${tc.id}`,
+              type: 'tool_result',
+              title: language === 'th' ? `${tc.name} (ไม่ใช่งาน — ไม่รัน)` : `${tc.name} (not a task — refused)`,
+              content: notice,
+              toolResult: { toolCallId: tc.id, success: false, error: notice },
+              status: 'failed',
+              timestamp: Date.now()
+            });
+            appStore.appendToolAudit({
+              id: `a_${Date.now()}_${tc.id}`,
+              sessionId: this.currentSessionId,
+              toolName: tc.name,
+              argsPreview: JSON.stringify(tc.args).slice(0, 300),
+              mode: this.livePermissionMode(),
+              allowed: false,
+              requiresApproval: false,
+              decision: 'rejected',
+              reason: notice,
+              timestamp: Date.now()
+            });
+          }
+          finished = true;
+          break;
+        }
+
         messages.push({
           id: `asst_${Date.now()}_${stepCount}`,
           role: 'assistant',
@@ -1764,8 +1983,26 @@ Return your plan in structured markdown.`,
             return;
           }
 
+          // `ask_question` is answered by the user, not by the tool registry, so
+          // it is intercepted before permissions: there is nothing to approve
+          // about asking a question, and the run has to be able to park here.
+          const asked = await this.handleQuestionCall(mainWindow, tc, language);
+          if (asked) {
+            messages.push({
+              id: `tc_asked_${Date.now()}_${tc.id}`,
+              role: 'tool',
+              toolCallId: tc.id,
+              name: tc.name,
+              content: asked.success ? String(asked.output ?? '') : `Tool Error: ${asked.error}`,
+              timestamp: Date.now()
+            });
+            liveTodos[1].status = 'in_progress';
+            this.sendTodos(mainWindow, liveTodos);
+            continue;
+          }
+
           const mode = this.livePermissionMode(mainWindow, language);
-          const perm = permissionEngine.check(mode, tc);
+          const perm = permissionEngine.check(mode, tc, {}, this.permissionContext(language));
           const toolStartedAt = Date.now();
 
           if (!perm.allowed) {
@@ -1843,7 +2080,13 @@ Return your plan in structured markdown.`,
           // Token discipline (spec §39): the same call twice is answered from
           // memory, and a call that keeps coming back is refused — both cheaper
           // than paying for another identical round trip.
-          const verdict = this.ledger.inspect(tc);
+          //
+          // The refusal is the "never loop" law, which the user can switch off;
+          // the reuse below is not. Answering from a result already in hand is
+          // token economy, and turning that off would only make a run cost more.
+          const tried = this.ledger.inspect(tc);
+          const verdict: LoopVerdict =
+            tried.action === 'blocked' && !this.lawOn('no-loops') ? { action: 'run', count: tried.count } : tried;
           if (verdict.action === 'reuse') {
             const cached = verdict.cached ?? '';
             this.sendEvent(mainWindow, {
@@ -1913,6 +2156,7 @@ Return your plan in structured markdown.`,
           const result = await this.executeTool(tc, projectPath, (change) => {
             affectedFilesList.add(change.relativePath);
             touchedFiles.add(change.relativePath);
+            this.runFileChanges.push(change);
             this.sendFileChange(mainWindow, change);
           });
 
@@ -2060,9 +2304,10 @@ Return your plan in structured markdown.`,
       );
     }
 
-    liveTodos[1].status = 'completed';
-    liveTodos[2].status = 'completed';
-    liveTodos[3].status = 'completed';
+    // Whichever list this run carried, it ends with every row done — the build
+    // rows by index would crash on the one-row answer list, and the intent was
+    // always "close out the list", not "close out rows 2 through 4".
+    for (const todo of liveTodos) todo.status = 'completed';
     this.sendTodos(mainWindow, liveTodos);
 
     if (verificationWarning) {
@@ -2079,21 +2324,76 @@ Return your plan in structured markdown.`,
 
     // Spec §88 asks for the validation that actually ran, not a claim that
     // everything passed — a failed build is reported here as a failure.
-    const summaryText = buildCompletionSummary({
-      language,
-      changedFiles: Array.from(affectedFilesList),
-      validations: this.runValidations,
-      usage: sessionUsage
-    });
+    //
+    // An answer gets one line instead of the build report. "No files modified /
+    // no validation command ran" is an honest report of work, and there was no
+    // work: it reads as an empty task card under a two-sentence reply.
+    const summaryText = this.answerOnly
+      ? language === 'th'
+        ? 'ตอบกลับข้อความสั้น ๆ — ไม่ได้แก้ไฟล์ ไม่ได้รันเครื่องมือ'
+        : 'Answered the message — no files changed, no tool ran.'
+      : buildCompletionSummary({
+          language,
+          changedFiles: Array.from(affectedFilesList),
+          validations: this.runValidations,
+          usage: sessionUsage
+        });
+
+    // The end of a run needs the file list where the work happened, the way
+    // every serious IDE shows it: one row per file, additions green and
+    // deletions red, before the cost line. Built from the run's own
+    // file-change stream; the latest change per file is the one that counts.
+    const fileTally = new Map<string, { additions: number; deletions: number; type: FileChange['type'] }>();
+    for (const change of this.runFileChanges) {
+      fileTally.set(change.relativePath, {
+        additions: change.additions ?? 0,
+        deletions: change.deletions ?? 0,
+        type: change.type
+      });
+    }
+    if (fileTally.size > 0) {
+      const th = language === 'th';
+      const files = Array.from(fileTally.entries())
+        .slice(0, 60)
+        .map(([file, tally]) => ({ path: file, type: tally.type, additions: tally.additions, deletions: tally.deletions }));
+      const totalAdd = Array.from(fileTally.values()).reduce((sum, tally) => sum + tally.additions, 0);
+      const totalDel = Array.from(fileTally.values()).reduce((sum, tally) => sum + tally.deletions, 0);
+      this.sendEvent(mainWindow, {
+        id: `files_changed_${Date.now()}`,
+        type: 'summary',
+        title: th
+          ? `ปรับไป ${fileTally.size} ไฟล์  (+${totalAdd} −${totalDel})`
+          : `Changed ${fileTally.size} files (+${totalAdd} −${totalDel})`,
+        details: { files },
+        timestamp: Date.now()
+      });
+    }
 
     this.stopReason = 'completed';
-    this.sendEvent(mainWindow, {
-      id: `summary_${Date.now()}`,
-      type: 'summary',
-      title: language === 'th' ? 'สรุปผลการทำงาน (Summary)' : 'Completion Summary',
-      content: summaryText,
-      timestamp: Date.now()
-    });
+
+    // The report goes where the cost is. It used to be a card in the middle of
+    // the conversation, which interrupted the transcript and still said nothing
+    // about which request it belonged to; the usage view answers "what did this
+    // request do, and what did it cost" in one place, so the report is stored on
+    // that request's usage row and the panel is refreshed to show it.
+    const recordedSummary = appStore.saveRunSummary(
+      this.currentSessionId,
+      summaryText,
+      prompt.replace(/\s+/g, ' ').trim().slice(0, 180)
+    );
+    if (recordedSummary) {
+      this.send(mainWindow, IPC_CHANNELS.USAGE_EVENT, usageService.summary(this.currentSessionId));
+    }
+
+    // The changed-files card went out as a live event; the run ends here and the
+    // app is often closed seconds later, so the debounced flush can lose the
+    // very card the user was promised. Flushing now is what makes the summary
+    // survive on the transcript a reopen reads.
+    if (this.transcriptTimer) {
+      clearTimeout(this.transcriptTimer);
+      this.transcriptTimer = null;
+    }
+    this.writeTranscript(true);
 
     appStore.upsertSession({
       id: this.currentSessionId,
@@ -2299,7 +2599,6 @@ Return your plan in structured markdown.`,
     try {
       while (steps < maxSteps) {
         if (this.isCancelled()) throw new Error('Cancelled.');
-        if (this.budgetBlocks()) throw new Error('The usage budget for this period is exhausted.');
 
         steps++;
         let text = '';
@@ -2390,7 +2689,14 @@ Return your plan in structured markdown.`,
   ): Promise<string> {
     const role = definition.role as SubagentRole;
     const toolStartedAt = Date.now();
-    const perm = permissionEngine.check(this.livePermissionMode(), toolCall);
+    // A subagent wears the parent's rules, including the project boundary: it
+    // runs on the same folder and the same request, so the same laws apply.
+    const perm = permissionEngine.check(
+      this.livePermissionMode(),
+      toolCall,
+      {},
+      this.permissionContext(settings.language)
+    );
 
     if (!perm.allowed) {
       this.sendEvent(mainWindow, {
@@ -2459,6 +2765,7 @@ Return your plan in structured markdown.`,
 
     const result = await this.executeTool(toolCall, projectPath, (change) => {
       this.runAffectedFiles.add(change.relativePath);
+      this.runFileChanges.push(change);
       this.sendFileChange(mainWindow, change);
     });
 
@@ -2552,6 +2859,50 @@ Return your plan in structured markdown.`,
   }
 
   /**
+   * What Plan Mode asks the model to do, in order.
+   *
+   * The order is the point. An agent that jumps straight to a plan for an
+   * underspecified request produces a plan for the wrong product, and the user's
+   * only recourse is to read it and start over. So the first instruction is to
+   * ask — with options the user can click — about anything that would change
+   * what gets built, and only then to plan. The last section exists so the plan
+   * shows which answers it is built on, and every assumption that was not asked.
+   */
+  private planningInstruction(prompt: string, language: 'th' | 'en'): string {
+    const shared = `Request: "${prompt}"`;
+
+    if (language === 'th') {
+      return `${shared}
+
+ขั้นที่ 1 — ถ้าก่อน: ถ้าคำขอนี้ยังเปิดช่องให้ตัดสินใจเรื่องที่ทำให้งานที่ได้ต่างกันจริง ๆ (ทำให้ใครใช้ · ข้อมูลจากไหน · แพลตฟอร์ม/ภาษา · หน้าตาและธีม · ขอบเขตของรอบแรก · งบหรือโฮสติ้ง · ระบบเดิมที่ต้องต่อด้วย) ให้เรียก ask_question ก่อน 1-4 ข้อ ข้อละ 2-4 ตัวเลือกที่ชัดเจน ห้ามเขียนแผนก่อนได้คำตอบ ถ้าไม่มีอะไรต้องถามจริง ๆ (คำขอระบุครบทุกอย่างแล้ว) ให้ข้ามไปขั้นที่ 2 เลย และถ้าคำตอบมาครบแล้วก็ห้ามถามซ้ำ
+
+ขั้นที่ 2 — เขียนแผนเป็น markdown ที่มีหัวข้อเหล่านี้ครบ:
+## สรุป — หนึ่งย่อหน้า: งานเสร็จแล้วจะได้อะไร
+## ขั้นตอน — ไล่เลข แต่ละข้อทำจบและตรวจสอบได้เอง
+## ไฟล์ที่เกี่ยวข้อง — ระบุพาธ แยกไฟล์ใหม่/ไฟล์ที่แก้
+## ขอบเขต — รอบนี้ทำถึงไหน และตั้งใจไม่ทำอะไร
+## ความเสี่ยง — Low/Medium/High พร้อมเหตุผล
+## ข้อกำหนดที่ยืนยันแล้ว — คำตอบของผู้ใช้ และสมมติฐานที่ต้องตั้งเองถ้ามี
+
+โหมดนี้ยังห้ามแก้ไฟล์ทุกกรณี`;
+    }
+
+    return `${shared}
+
+STEP 1 — Ask, do not guess. If this request leaves any decision open that would change what actually gets built (who uses it · where the data comes from · platform or language · look and theme · how far the first iteration goes · budget or hosting · existing systems to integrate with), call ask_question FIRST with 1-4 questions, each with 2-4 concrete options. Do not write any part of the plan before the answers arrive. If there is genuinely nothing to ask — the request already fixes every decision — go straight to STEP 2, and once something has been answered do not ask it again.
+
+STEP 2 — Produce the plan as markdown with every one of these sections:
+## Summary — one paragraph: what exists when this is done
+## Steps — numbered, each one executable and verifiable on its own
+## Affected files — paths, split into new and changed
+## Scope — how far this round goes, and what it deliberately leaves out
+## Risk — Low/Medium/High with the reason
+## Confirmed requirements — the user's answers, plus any assumption you had to make
+
+Writing files is still forbidden in this mode.`;
+  }
+
+  /**
    * Read-only inspection loop used by Plan Mode so the model can look at the
    * repository before writing its plan (spec §7).
    */
@@ -2566,7 +2917,9 @@ Return your plan in structured markdown.`,
     const language: 'th' | 'en' = settings.language === 'en' ? 'en' : 'th';
     let accumulated = '';
     let guard = 0;
-    const maxInspections = 6;
+    // Room for a question round, a second question round after the answers, and
+    // the reconnaissance reads in between — without letting the loop wander.
+    const maxInspections = 8;
 
     while (guard < maxInspections) {
       guard++;
@@ -2581,7 +2934,7 @@ Return your plan in structured markdown.`,
         {
           model: this.currentModelId,
           messages,
-          tools: toolRegistry.getToolDefinitions('plan'),
+          tools: this.toolDefinitionsFor('plan'),
           reasoningEffort: settings.reasoningEffort,
           sessionId: this.currentSessionId,
           signal: this.abortController?.signal
@@ -2595,20 +2948,42 @@ Return your plan in structured markdown.`,
 
       accumulated += text;
 
+      // Questions come first, and on their own: the plan that follows should be
+      // built on the user's answers, not on assumptions made while asking.
+      const questions = toolCalls.filter((tc) => tc.name === 'ask_question');
       const inspections = toolCalls.filter((tc) => {
-        const perm = permissionEngine.check('safe', tc);
+        if (tc.name === 'ask_question') return false;
+        // Planning reads pass through the same guardrails as everything else, so
+        // even the reconnaissance step stays inside the project.
+        const perm = permissionEngine.check('safe', tc, {}, this.permissionContext(language));
         return perm.allowed && !perm.requiresApproval;
       });
 
-      if (inspections.length === 0) break;
+      if (questions.length === 0 && inspections.length === 0) break;
 
       messages.push({
         id: `plan_asst_${guard}`,
         role: 'assistant',
         content: text,
-        toolCalls: inspections,
+        toolCalls: [...questions, ...inspections],
         timestamp: Date.now()
       });
+
+      for (const tc of questions) {
+        const result = await this.handleQuestionCall(mainWindow, tc, language);
+        if (this.isCancelled(token)) {
+          this.sendStatus(mainWindow, 'cancelled');
+          return '';
+        }
+        messages.push({
+          id: `plan_ans_${tc.id}`,
+          role: 'tool',
+          toolCallId: tc.id,
+          name: tc.name,
+          content: result?.success ? String(result.output ?? '') : `Tool Error: ${result?.error}`,
+          timestamp: Date.now()
+        });
+      }
 
       for (const tc of inspections) {
         this.sendEvent(mainWindow, {
@@ -2621,8 +2996,11 @@ Return your plan in structured markdown.`,
           timestamp: Date.now()
         });
         // Planning reads are the most repeated calls in a whole session, so the
-        // ledger is consulted here first as well (§39).
-        const verdict = this.ledger.inspect(tc);
+        // ledger is consulted here first as well (§39), under the same law as
+        // the main loop.
+        const tried = this.ledger.inspect(tc);
+        const verdict: LoopVerdict =
+          tried.action === 'blocked' && !this.lawOn('no-loops') ? { action: 'run', count: tried.count } : tried;
         if (verdict.action === 'reuse') {
           const cached = verdict.cached ?? '';
           this.sendEvent(mainWindow, {

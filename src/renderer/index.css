@@ -13,6 +13,8 @@
   --d4-bg: 0 0 0;
   --d4-panel: 9 9 11;
   --d4-surface: 19 19 22;
+  --d4-bubble: 19 19 22;
+  --d4-bubble-text: 244 244 245;
   --d4-subtle: 28 28 32;
   --d4-border: 39 39 44;
   --d4-border-subtle: 24 24 27;
@@ -27,10 +29,42 @@
   --d4-info: 59 130 246;
 }
 
+/*
+ * Freebuff: the second dark palette — a near-black canvas, neutral greys told
+ * apart by surface rather than by border, and one soft lime accent. Chosen in
+ * Settings → Appearance; the D4 palettes above are untouched by it.
+ */
+.d4-freebuff {
+  --d4-bg: 11 11 11;
+  --d4-panel: 20 20 20;
+  --d4-surface: 28 28 28;
+  /*
+   * The user's own words sit in a light bubble with dark type — the one place
+   * this palette inverts — so a question is never mistaken for the agent's
+   * answer when the two are read in the same scroll.
+   */
+  --d4-bubble: 224 226 221;
+  --d4-bubble-text: 18 18 18;
+  --d4-subtle: 38 38 38;
+  --d4-border: 46 46 46;
+  --d4-border-subtle: 32 32 32;
+  --d4-text: 237 237 237;
+  --d4-muted: 163 163 163;
+  --d4-dimmed: 112 112 112;
+  --d4-accent: 184 217 154;
+  --d4-accent-hover: 165 200 134;
+  --d4-success: 134 196 120;
+  --d4-warning: 226 178 96;
+  --d4-error: 226 110 100;
+  --d4-info: 130 170 230;
+}
+
 .d4-light {
   --d4-bg: 250 250 250;
   --d4-panel: 255 255 255;
   --d4-surface: 244 244 245;
+  --d4-bubble: 244 244 245;
+  --d4-bubble-text: 24 24 27;
   --d4-subtle: 228 228 231;
   --d4-border: 212 212 216;
   --d4-border-subtle: 232 232 236;
@@ -117,4 +151,29 @@
   .d4-scroll-none::-webkit-scrollbar {
     display: none;
   }
+}
+
+/*
+ * The user's own message may invert its ink — the Freebuff palette prints dark
+ * type on light paper — so everything inside that bubble takes the bubble's
+ * colour instead of the page's. Markdown is authored against the page palette
+ * (muted greys, a dark code plate, hairline borders), and on inverted paper
+ * that turns into text the user cannot read. Where bubble ink equals page ink
+ * nothing changes, which is every theme but Freebuff.
+ */
+.d4-user-bubble :is(p, li, td, th, h1, h2, h3, h4, blockquote, strong, em, a, code, pre) {
+  color: inherit;
+}
+
+.d4-user-bubble :is(code, pre) {
+  background: rgb(var(--d4-bubble-text) / 0.08);
+  border-color: rgb(var(--d4-bubble-text) / 0.14);
+}
+
+.d4-user-bubble thead tr {
+  background: rgb(var(--d4-bubble-text) / 0.06);
+}
+
+.d4-user-bubble :is(table, tr, th, td) {
+  border-color: rgb(var(--d4-bubble-text) / 0.16);
 }

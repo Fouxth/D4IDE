@@ -1,7 +1,9 @@
 import path from 'path';
 import fs from 'fs';
 import { ContextItem } from '../../../shared/types';
+import { PROJECT_RULE_FILES, mergeRuleFiles } from '../../../shared/rules';
 import { fileService } from '../../filesystem/file-service';
+import { readRulesFile } from './rules-files';
 
 const SECRET_PATTERNS = [
   /-----BEGIN\s+(RSA|OPENSSH|EC|PGP)?\s*PRIVATE\s+KEY-----/i,
@@ -30,23 +32,23 @@ export class ContextEngine {
     return Math.ceil(text.length / 4);
   }
 
+  /**
+   * Every rule file the project keeps, not just the first one found.
+   *
+   * Returning at the first file meant that adding `.d4ide/rules.md` silently
+   * dropped everything written in `D4IDE.md` — the project's own documentation,
+   * and often the file the user had been keeping rules in. Each file is now
+   * labelled with its name so a surprising rule can be traced to its source, and
+   * the whole body is capped so a rules file that grew into an essay cannot cost
+   * more than the task.
+   */
   loadProjectRules(projectPath: string): string {
-    const rulesPaths = [
-      path.join(projectPath, '.d4ide', 'rules.md'),
-      path.join(projectPath, 'D4IDE.md'),
-      path.join(projectPath, '.cursorrules')
-    ];
-
-    for (const p of rulesPaths) {
-      if (fs.existsSync(p)) {
-        try {
-          const content = fs.readFileSync(p, 'utf8');
-          // Take first 3000 chars of rules to conserve tokens
-          return content.slice(0, 4000);
-        } catch {}
-      }
-    }
-    return '';
+    if (!projectPath) return '';
+    const files = PROJECT_RULE_FILES.map((name) => ({
+      name,
+      content: readRulesFile(path.join(projectPath, name)) ?? ''
+    })).filter((file) => file.content.trim().length > 0);
+    return mergeRuleFiles(files);
   }
 
   resolveMention(mention: string, projectPath: string): ContextItem | null {

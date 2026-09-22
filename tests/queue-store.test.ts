@@ -85,9 +85,20 @@ describe('queue running', () => {
     queue().runNext();
 
     expect(setMode).toHaveBeenCalledWith('plan');
-    expect(startAgent).toHaveBeenCalledWith('first');
+    expect(startAgent).toHaveBeenCalledWith('first', undefined);
     expect(queue().items[0].status).toBe('running');
     expect(queue().items[1].status).toBe('queued');
+  });
+
+  // A queued message keeps its pictures: sending the words without the
+  // screenshot they referred to is a different message.
+  it('carries the images attached when the task was queued', () => {
+    const image = { id: 'img_1', name: 'shot.png', mimeType: 'image/png', data: 'AAAA', bytes: 3 };
+    queue().addItem('look at this', 'build', [image]);
+
+    queue().runNext();
+
+    expect(startAgent).toHaveBeenCalledWith('look at this', [image]);
   });
 
   it('does not advance while the queue is paused', () => {
@@ -121,7 +132,7 @@ describe('queue running', () => {
 
     expect(queue().autoRun).toBe(true);
     expect(queue().items.map((i) => i.status)).toEqual(['running', 'queued']);
-    expect(startAgent).toHaveBeenCalledWith('one');
+    expect(startAgent).toHaveBeenCalledWith('one', undefined);
   });
 
   it('marks finished work by the terminal status the agent reported', () => {
@@ -165,7 +176,7 @@ describe('queue running', () => {
     queue().runItem(second.id);
 
     expect(setMode).toHaveBeenCalledWith('build');
-    expect(startAgent).toHaveBeenCalledWith('second');
+    expect(startAgent).toHaveBeenCalledWith('second', undefined);
     expect(queue().items[0].status).toBe('queued');
     expect(queue().items[1].status).toBe('running');
   });

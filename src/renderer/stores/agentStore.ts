@@ -5,10 +5,12 @@ import {
   AgentStatus,
   AgentTimelineItem,
   AgentTodo,
+  Mission,
   PlanData,
   PlanScope,
   PlanStepDecision,
   PromptImage,
+  QuestionAnswer,
   SessionSummary
 } from '../../shared/types';
 import { DesignStyle } from '../../shared/design-profiles';
@@ -42,6 +44,15 @@ interface AgentState {
   currentPlan: PlanData | null;
   /** The conversation currently in the agent view; prompts continue this session. */
   sessionId: string | null;
+  /**
+   * The mission in force for this session (spec §40), as the interface knows it.
+   *
+   * Kept here rather than only in the mission panel so the two things that have
+   * to agree — the panel's on/off switch and the goal card above the transcript
+   * — read the same value. A mission exists only because the user set one, which
+   * is what makes the card appear.
+   */
+  mission: Mission | null;
   recoverableSession: RecoverableSession | null;
   /** Set when a prompt was sent before any project folder was open. */
   pendingSend: PendingSend | null;
@@ -62,9 +73,23 @@ interface AgentState {
   chooseDesignStyle: (style: Exclude<DesignStyle, 'ask'>) => Promise<void>;
   /** Answers the gate between build steps (continue / run the rest / stop). */
   planStepDecision: (decision: PlanStepDecision) => Promise<void>;
+  /** Sends the user's answers to the question card and lets the run continue. */
+  answerQuestions: (answer: QuestionAnswer) => Promise<void>;
   addTimelineItem: (item: AgentTimelineItem) => void;
   updateStatus: (status: AgentStatus) => void;
   setTodos: (todos: AgentTodo[]) => void;
+  /**
+   * The id this conversation will be saved under, created on first ask.
+   *
+   * `/goal` has to attach a mission to a session before the first prompt exists,
+   * and `startAgent` used to be the only place an id was minted — so a goal set
+   * on a fresh session had nothing to attach to and was silently dropped.
+   */
+  ensureSessionId: () => string;
+  /** Records the session mission and reports it back to main. */
+  setMission: (mission: Mission | null) => Promise<void>;
+  /** Reads the stored mission when a session is opened or resumed. */
+  loadMission: (sessionId?: string | null) => Promise<void>;
   /** Starts a brand new session (the "New Session" action). */
   clearSession: () => void;
   /** Replays a stored session and keeps talking in it (spec §45). */
@@ -89,6 +114,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   todos: [],
   currentPlan: null,
   sessionId: null,
+  mission: null,
   recoverableSession: null,
   pendingSend: null,
 
@@ -190,6 +216,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({ status: decision === 'stop' ? 'paused' : 'running' });
   },
 
+  answerQuestions: async (answer) => {
+    if (!window.electronAPI?.answerQuestions) return;
+    await window.electronAPI.answerQuestions(answer);
+    // The run is only unblocked once main has the answer, so the timer and
+    // spinner resume here rather than when the button was clicked.
+    set({ status: 'running' });
+  },
+
   addTimelineItem: (item: AgentTimelineItem) => {
     set((state) => ({
       timeline: [...state.timeline, item],
@@ -202,6 +236,36 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   updateStatus: (status: AgentStatus) => set({ status }),
   setTodos: (todos: AgentTodo[]) => set({ todos }),
 
+  ensureSessionId: () => {
+    const existing = get().sessionId;
+    if (existing) return existing;
+    const created = newSessionId();
+    set({ sessionId: created });
+    return created;
+  },
+
+  setMission: async (mission) => {
+    const sessionId = get().ensureSessionId();
+    set({ mission });
+    await window.electronAPI?.setMission(sessionId, mission).catch(() => undefined);
+  },
+
+  loadMission: async (sessionId) => {
+    const id = sessionId ?? get().sessionId;
+    if (!id || !window.electronAPI) {
+      set({ mission: null });
+      return;
+    }
+    try {
+      const stored = await window.electronAPI.getMission(id);
+      // An empty mission is no mission: the card that says "what am I doing?"
+      // must not appear because a blank row exists in the file.
+      set({ mission: stored && stored.objective?.trim() ? stored : null });
+    } catch {
+      set({ mission: null });
+    }
+  },
+
   clearSession: () =>
     set({
       timeline: [],
@@ -210,6 +274,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       status: 'idle',
       runStartedAt: null,
       sessionId: null,
+      mission: null,
       recoverableSession: null
     }),
 
@@ -243,6 +308,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       todos: transcript.todos ?? [],
       currentPlan: transcript.plan ?? null,
       sessionId: transcript.sessionId,
+      mission: transcript.mission && transcript.mission.objective?.trim() ? transcript.mission : null,
       status: 'idle',
       runStartedAt: null,
       recoverableSession: null

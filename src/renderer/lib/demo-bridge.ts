@@ -14,6 +14,12 @@ import { DEMO_TIMELINE } from './demo-session';
  * with no query string, so it cannot run in a shipped build.
  */
 
+/**
+ * `?demo=1&empty=1` is a first launch: the demo has no recent folder to reopen,
+ * so the app comes up with no project and the empty workspace can be looked at.
+ */
+const NO_PROJECT = typeof location !== 'undefined' && /[?&]empty=1/.test(location.search);
+
 const SETTINGS: AppSettings = {
   language: 'th',
   theme: 'd4-dark',
@@ -27,12 +33,6 @@ const SETTINGS: AppSettings = {
   activeModelId: 'glm-5.3',
   routingProfile: 'balanced',
   reasoningEffort: 'medium',
-  dailyBudget: 10,
-  monthlyBudget: 100,
-  perRequestBudget: 1,
-  budgetHardStop: false,
-  autoThriftOnBudget: true,
-  budgetWarnThreshold: 0.8,
   thriftMode: false,
   contextTokenBudget: 48000,
   runTokenBudget: 0,
@@ -50,6 +50,8 @@ const SETTINGS: AppSettings = {
   catalogCheckEnabled: true,
   catalogCheckIntervalHours: 24,
   lastCatalogCheckAt: 0,
+  providerHealthCheckEnabled: true,
+  providerHealthCheckIntervalMinutes: 10,
   autoFallback: true,
   fallbackChain: [],
   toolTimeoutMs: 120000,
@@ -57,12 +59,15 @@ const SETTINGS: AppSettings = {
   checkpointFrequency: 'write',
   favoriteModels: ['opencode-go::glm-5.3'],
   recentModels: ['opencode-go::kimi-k3', 'anthropic::claude-sonnet-5'],
-  recentProjects: ['F:\\D4IDE'],
+  recentProjects: NO_PROJECT ? [] : ['F:\\D4IDE'],
+  spaces: NO_PROJECT ? [] : ['F:\\D4IDE', 'F:\\HuayD', 'F:\\work\\dr-thongchai'],
   sessionOrder: [],
   firstRunComplete: true,
   removedProviderIds: [],
   logLevel: 'info',
   desktopNotifications: true,
+  notificationSound: 'chime',
+  disabledLaws: [],
   requireLogin: false
 };
 
@@ -86,20 +91,7 @@ const USAGE: UsageSummary = {
     { ...zeroAggregate, key: 'claude-sonnet-5', label: 'Claude Sonnet 5', cost: 2.8 }
   ],
   byProject: [{ ...zeroAggregate, key: 'F:\\D4IDE', label: 'D4IDE', cost: 18.4 }],
-  recent: [],
-  budget: {
-    perRequest: 1,
-    daily: 10,
-    monthly: 100,
-    warnThreshold: 0.8,
-    hardStop: false,
-    dailySpent: 1.31,
-    monthlySpent: 18.4,
-    dailyPct: 0.131,
-    monthlyPct: 0.184,
-    warn: false,
-    exceeded: false
-  }
+  recent: []
 };
 
 const SESSIONS: SessionSummary[] = [
@@ -318,9 +310,28 @@ const EXPLICIT: Record<string, (...args: any[]) => any> = {
   getUsage: async () => USAGE,
   resetUsage: async () => USAGE,
   getUpdateStatus: async () => ({ state: 'unsupported', channel: 'demo' }),
+  // The catalogue screen has a real shape, so the demo answers with one: an
+  // empty reply used to take the whole Updates tab down with it.
+  getCatalogStatus: async () => ({ state: 'idle', undoAvailable: false }),
+  checkCatalog: async () => ({ state: 'idle', undoAvailable: false, checkedAt: now }),
+  applyCatalog: async () => ({ state: 'idle', undoAvailable: true }),
+  discardCatalog: async () => ({ state: 'idle', undoAvailable: false }),
+  undoCatalog: async () => ({ state: 'idle', undoAvailable: false }),
   getProjectTree: () => TREE,
-  gitStatus: async () => ({ branch: 'master', staged: [], unstaged: [], untracked: [] }),
+  gitStatus: async () => ({
+    branch: 'main',
+    isRepo: true,
+    remote: 'https://github.com/Fouxd/D4IDE.git',
+    staged: [],
+    unstaged: [],
+    untracked: []
+  }),
   listSkills: async () => SKILLS,
+  // The demo bridge has no files: the laws still show (they come from the shared
+  // module), and saving a rule reports honestly instead of pretending.
+  getRules: async () => ({ global: '', project: '', globalPath: '', projectFile: '' }),
+  saveRules: async () => ({ success: false, error: 'The demo bridge has no filesystem.' }),
+  revealRules: async () => ({ success: false, error: 'The demo bridge has no filesystem.' }),
   listCheckpoints: async () => [],
   listToolAudit: async () => [],
   listMcp: async () => MCP_SERVERS,
@@ -330,11 +341,31 @@ const EXPLICIT: Record<string, (...args: any[]) => any> = {
   refreshMcpTools: async () => ({ tools: 3 }),
   logCounts: async () => ({}),
   readLogs: async () => [],
-  detectPreviewUrls: async () => ['http://localhost:5173'],
+  // Nothing real is serving in a browser, so the panel is told exactly that.
+  // Returning a port here would demo a panel that lies about its own state.
+  detectPreviewUrls: async () => [],
+  launchPreview: async () => ({
+    started: true,
+    command: 'npm run dev -- --port 1001',
+    script: 'dev',
+    packageManager: 'npm',
+    port: 1001
+  }),
   resolveAutoModel: async () => ({ modelName: 'GLM 5.3', reason: 'Demo bridge — nothing was called.' }),
   readFile: async () => '// The demo bridge has no filesystem. Open a project to read real files.\n',
   searchFiles: async () => [],
   openProjectDialog: async () => null,
+  // The recent folder has to actually open: every panel — tree, git, terminal,
+  // preview — keys off `projectPath`, so a demo that cannot open a folder is a
+  // demo of the empty workspace and nothing else.
+  openProjectPath: async (target: string) => !!target,
+  // The rail keeps its spaces in the settings the demo hands back, so removing
+  // one here behaves like the real app: the badge goes and nothing else moves.
+  getSpaces: async () => SETTINGS.spaces ?? [],
+  forgetSpace: async (target: string) => {
+    SETTINGS.spaces = (SETTINGS.spaces ?? []).filter((space) => space !== target);
+    return SETTINGS.spaces;
+  },
   onAgentEvent: unsubscribe,
   onUsageEvent: unsubscribe,
   onApprovalRequest: unsubscribe,

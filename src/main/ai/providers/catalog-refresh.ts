@@ -8,6 +8,8 @@ import {
   ProviderCatalogChange,
   ProviderConfig
 } from '../../../shared/types';
+import { clampToGoPlan } from '../../../shared/opencode-go-plan';
+import { isLocalRuntime } from '../../../shared/provider-vendors';
 import { appStore } from '../../database/store';
 import { logService } from '../../logging/log-service';
 import { IPC_CHANNELS } from '../../../shared/ipc-events';
@@ -301,13 +303,26 @@ export class CatalogRefreshService {
 
   // --------------------------------------------------------------------- check
 
-  /** Providers worth asking: enabled, not removed by the user, and reachable. */
+  /**
+   * Providers worth asking: enabled, not removed by the user, and reachable.
+   *
+   * Local runtimes are asked only when the user turned them on (or is talking to
+   * one right now). With the setting off, a check spent its whole round trip on
+   * Ollama and LM Studio — endpoints that answer "nothing here" on most machines
+   * — and reported no changes for the accounts the user actually pays for.
+   */
   private candidates(): ProviderConfig[] {
     const settings = appStore.getSettings();
     return appStore
       .getProviders()
       .filter((provider) => provider.enabled)
       .filter((provider) => !settings.removedProviderIds.includes(provider.id))
+      .filter(
+        (provider) =>
+          settings.localProvidersEnabled ||
+          provider.id === settings.activeProviderId ||
+          !isLocalRuntime(provider)
+      )
       .filter((provider) => provider.requiresApiKey === false || provider.apiKey);
   }
 
@@ -341,7 +356,10 @@ export class CatalogRefreshService {
       for (const provider of candidates) {
         const result = await providerManager.discoverModels(provider.id);
         if (result.success && result.models) {
-          discovered.push({ providerId: provider.id, providerName: provider.name, models: result.models });
+          // Same clamp the apply path uses, so the preview cannot promise a Go
+          // model the subscription does not serve.
+          const models = clampToGoPlan(provider.id, result.models);
+          discovered.push({ providerId: provider.id, providerName: provider.name, models });
         } else {
           failures.push({ providerId: provider.id, error: result.error || 'No answer' });
         }

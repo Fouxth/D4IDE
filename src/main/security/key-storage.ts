@@ -32,11 +32,24 @@ export class KeyStorage {
   }
 
   decrypt(ciphertext: string): string {
-    if (!ciphertext) return '';
+    return this.decryptChecked(ciphertext).value;
+  }
+
+  /**
+   * `decrypt`, but it says whether the value came back empty because the
+   * ciphertext was empty or because decryption *failed*.
+   *
+   * The two are different facts and callers must not confuse them: before
+   * `app.whenReady()` every `dpapi:` decrypt throws, so a stored key reads as
+   * empty. Treating that as "this provider has no key" is what once let the app
+   * send requests with no `Authorization` header at all.
+   */
+  decryptChecked(ciphertext: string): { value: string; failed: boolean } {
+    if (!ciphertext) return { value: '', failed: false };
     try {
       if (ciphertext.startsWith('dpapi:')) {
         const buffer = Buffer.from(ciphertext.slice(6), 'base64');
-        return safeStorage.decryptString(buffer);
+        return { value: safeStorage.decryptString(buffer), failed: false };
       }
       if (ciphertext.startsWith('aes:')) {
         const parts = ciphertext.slice(4).split(':');
@@ -48,13 +61,16 @@ export class KeyStorage {
           decipher.setAuthTag(authTag);
           let decrypted = decipher.update(encrypted, 'hex', 'utf8');
           decrypted += decipher.final('utf8');
-          return decrypted;
+          return { value: decrypted, failed: false };
         }
       }
     } catch (e) {
       console.error('Decryption error:', e);
+      return { value: '', failed: true };
     }
-    return '';
+    // Well-formed prefix we do not recognise: nothing to decrypt, and no point
+    // retrying on the next read.
+    return { value: '', failed: false };
   }
 }
 

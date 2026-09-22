@@ -23,7 +23,7 @@ export type CommandCategory = 'plan' | 'code' | 'quality' | 'git' | 'docs' | 'op
  * ceiling, the same reasoning effort. The user paid for a longer prompt and got
  * the same bill. A command that claims to save money has to move a real dial.
  */
-export type CommandAction = 'toggle-thrift' | 'set-thrift-on' | 'set-thrift-off' | 'open-design';
+export type CommandAction = 'toggle-thrift' | 'set-thrift-on' | 'set-thrift-off' | 'open-design' | 'set-mission';
 
 export interface BuiltinCommand {
   id: string;
@@ -48,6 +48,17 @@ export interface BuiltinCommand {
 }
 
 export const BUILTIN_COMMANDS: BuiltinCommand[] = [
+  {
+    id: 'goal',
+    category: 'plan',
+    action: 'set-mission',
+    summary: {
+      en: 'Set this session’s mission — the statement the work is measured against',
+      th: 'ตั้งภารกิจของเซสชันนี้ — ข้อความที่ใช้ยึดในการทำงาน'
+    },
+    prompt:
+      'Session mission (bind for the whole task):\n\n{input}\n\nWork to that mission from here on: state what "done" means for it, do the work, and prove it with the exact command or test result rather than a summary. Say so before acting if something in this request conflicts with the mission.\n\n{input}'
+  },
   {
     id: 'plan',
     category: 'plan',
@@ -160,6 +171,39 @@ export const BUILTIN_COMMANDS: BuiltinCommand[] = [
       'Look for performance problems in scope — repeated work, unnecessary I/O, unbounded loops or queries, missing indexes, needless re-renders. Measure where you can, fix the ones that matter, and do not trade correctness for speed.\n\n{input}'
   },
   {
+    id: 'mobile',
+    category: 'code',
+    summary: {
+      en: 'Make the screens in scope work as mobile UI first',
+      th: 'จัดหน้าจอในขอบเขตให้เป็น Mobile UI ก่อน'
+    },
+    prompt:
+      'Rework the screens in scope as mobile-first UI: one column at 360px, touch-sized targets, no fixed widths, nothing overflowing a small viewport. Then let it scale up naturally to tablet and desktop. Verify with a narrow-viewport screenshot and report it.'
+      + '\n\n{input}'
+  },
+  {
+    id: 'responsive',
+    category: 'code',
+    summary: {
+      en: 'Make the screens in scope responsive across breakpoints',
+      th: 'ทำหน้าจอในขอบเขตให้ Responsive ทุก breakpoint'
+    },
+    prompt:
+      'Make the screens in scope responsive: mobile 360px, tablet 768px, laptop 1280px, desktop 1440px+. Use fluid layout (no px-fixed widths), collapse grids and sidebars sensibly, keep tables scrollable, and prove it with screenshots at a narrow and a wide viewport.'
+      + '\n\n{input}'
+  },
+  {
+    id: 'responsive-all',
+    category: 'code',
+    summary: {
+      en: 'Responsive audit and fix across every screen of the project',
+      th: 'ตรวจและแก้ Responsive ทุกหน้าจอของโปรเจกต์'
+    },
+    prompt:
+      'Audit every screen of this project for responsive correctness on all devices (mobile 360px, tablet 768px, laptop 1280px, desktop 1440px+). Fix every overflow, cramped row, fixed width and broken navigation found, then verify with screenshots at a narrow and a wide viewport and list what you fixed per screen.'
+      + '\n\n{input}'
+  },
+  {
     id: 'a11y',
     category: 'quality',
     summary: {
@@ -264,4 +308,25 @@ export function expandCommandPrompt(command: BuiltinCommand, input: string): str
     return command.prompt.replace(/\{input\}/g, '').trim();
   }
   return command.prompt.replace(/\{input\}/g, detail).trim();
+}
+
+/**
+ * Which command chip, if any, an outgoing prompt was built from.
+ *
+ * The timeline shows the user's turn the way the composer showed it: a small
+ * bold /chip above their own words. Matched on the template's prefix, so the
+ * answer survives the user editing their detail text afterwards.
+ */
+export function commandChipFor(outgoing: string): { id: string; detail: string } | null {
+  const text = outgoing.trim();
+  for (const command of BUILTIN_COMMANDS) {
+    const prefix = command.prompt.split('{input}')[0].replace(/\s+/g, ' ').trim();
+    if (!prefix) continue;
+    const flat = text.replace(/\s+/g, ' ');
+    if (flat.startsWith(prefix)) {
+      const rest = flat.slice(prefix.length).trim();
+      return { id: command.id, detail: rest };
+    }
+  }
+  return null;
 }

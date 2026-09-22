@@ -119,8 +119,8 @@ describe('settings and provider reads', () => {
   it('never serves a settings value the last write disproved', () => {
     // The cache is stamp-based, and two writes inside one millisecond can share
     // a stamp, so each write states the new value rather than relying on time.
-    appStore.saveSettings({ dailyBudget: 3 });
-    appStore.saveSettings({ dailyBudget: 7 });
-    expect(appStore.getSettings().dailyBudget).toBe(7);
+    appStore.saveSettings({ contextTokenBudget: 30_000 });
+    appStore.saveSettings({ contextTokenBudget: 70_000 });
+    expect(appStore.getSettings().contextTokenBudget).toBe(70_000);
   });
 });

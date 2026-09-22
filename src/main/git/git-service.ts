@@ -23,6 +23,34 @@ export interface GitCommandResult {
   exitCode: number;
 }
 
+/**
+ * What `git status --porcelain` says, split by column.
+ *
+ * Kept out of the service so the parsing — the part that can be wrong in a
+ * quiet way — is testable without a repository on disk.
+ */
+export function parsePorcelain(output: string): { staged: string[]; unstaged: string[]; untracked: string[] } {
+  const staged: string[] = [];
+  const unstaged: string[] = [];
+  const untracked: string[] = [];
+
+  for (const line of output.split('\n').filter(Boolean)) {
+    const x = line[0];
+    const y = line[1];
+    const file = line.substring(3).trim();
+    if (!file) continue;
+
+    if (x === '?' && y === '?') {
+      untracked.push(file);
+      continue;
+    }
+    if (x !== ' ' && x !== '?') staged.push(file);
+    if (y !== ' ' && y !== '?') unstaged.push(file);
+  }
+
+  return { staged, unstaged, untracked };
+}
+
 export class GitService {
   private async git(cwd: string, args: string[]): Promise<string> {
     const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 10 * 1024 * 1024, windowsHide: true });
@@ -52,32 +80,43 @@ export class GitService {
     }
   }
 
+  /** `origin`'s URL, or the first remote there is. Null when there is none. */
+  async getRemote(cwd: string): Promise<string | null> {
+    const origin = await this.run(cwd, ['remote', 'get-url', 'origin']);
+    if (origin.exitCode === 0 && origin.stdout.trim()) return origin.stdout.trim();
+
+    const listed = await this.run(cwd, ['remote']);
+    const first = listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean)[0];
+    if (!first) return null;
+    const url = await this.run(cwd, ['remote', 'get-url', first]);
+    return url.stdout.trim() || null;
+  }
+
+  /**
+   * The status bar's view of a folder: is this a repository, does it have a
+   * remote, and what is on the working tree.
+   *
+   * `isRepo: false` is a real answer, not a failure — it is what tells the
+   * interface to leave git out of the corner of the screen entirely.
+   */
   async getStatus(cwd: string): Promise<GitStatusSummary> {
+    const empty = { branch: '', isClean: true, staged: [], unstaged: [], untracked: [] };
+    if (!cwd) return { ...empty, isRepo: false, remote: null };
+
+    if (!(await this.isGitRepo(cwd))) return { ...empty, isRepo: false, remote: null };
+
     try {
       const branch = (await this.git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
       const statusOut = await this.git(cwd, ['status', '--porcelain']);
       const lines = statusOut.split('\n').filter(Boolean);
+      const remote = await this.getRemote(cwd);
 
-      const staged: string[] = [];
-      const unstaged: string[] = [];
-      const untracked: string[] = [];
-
-      for (const line of lines) {
-        const x = line[0];
-        const y = line[1];
-        const file = line.substring(3).trim();
-
-        if (x === '?' && y === '?') {
-          untracked.push(file);
-        } else {
-          if (x !== ' ' && x !== '?') staged.push(file);
-          if (y !== ' ' && y !== '?') unstaged.push(file);
-        }
-      }
-
-      return { branch, isClean: lines.length === 0, staged, unstaged, untracked };
+      return { branch, isClean: lines.length === 0, ...parsePorcelain(statusOut), isRepo: true, remote };
     } catch {
-      return { branch: 'unknown', isClean: true, staged: [], unstaged: [], untracked: [] };
+      // A repository with no commits yet has no HEAD to name; that is not a
+      // reason to pretend the folder is not a repository.
+      const remote = await this.getRemote(cwd);
+      return { branch: '', isClean: true, staged: [], unstaged: [], untracked: [], isRepo: true, remote };
     }
   }
 

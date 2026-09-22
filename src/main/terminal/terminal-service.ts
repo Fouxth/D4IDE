@@ -152,7 +152,20 @@ export class TerminalService {
     return process.env.SHELL || 'bash';
   }
 
-  createTerminal(id: string, cwd: string, mainWindow: BrowserWindow, shellType?: string): void {
+  /**
+   * `env` is added to the shell's environment for this terminal only.
+   *
+   * It exists for one thing: a dev server that cannot be told its port on the
+   * command line reads `PORT` instead, and the only moment that can be set is
+   * before the process exists.
+   */
+  createTerminal(
+    id: string,
+    cwd: string,
+    mainWindow: BrowserWindow,
+    shellType?: string,
+    env?: Record<string, string>
+  ): void {
     if (this.terminals.has(id)) this.killTerminal(id);
 
     const shell = this.defaultShell(shellType);
@@ -168,7 +181,7 @@ export class TerminalService {
         const proc: PtyProcess = ptyModule.spawn(shell, [], {
           name: 'xterm-256color',
           cwd: cwd || process.cwd(),
-          env: { ...process.env, TERM: 'xterm-256color' },
+          env: { ...process.env, ...env, TERM: 'xterm-256color' },
           cols: 120,
           rows: 30
         });
@@ -195,7 +208,7 @@ export class TerminalService {
       }
     }
 
-    const proc = spawn(shell, [], { cwd: cwd || process.cwd(), env: { ...process.env, TERM: 'xterm-256color' } });
+    const proc = spawn(shell, [], { cwd: cwd || process.cwd(), env: { ...process.env, ...env, TERM: 'xterm-256color' } });
     const fallbackInstance: TerminalInstance = { id, cwd, shell, child: proc };
 
     proc.stdout.on('data', (data: Buffer) => this.publish(id, data.toString('utf8')));
@@ -223,11 +236,16 @@ export class TerminalService {
    * be previewed. The terminal stays open instead, the user can watch it in the
    * terminal panel, and its output feeds the preview registry.
    */
-  startServer(command: string, cwd: string, mainWindow?: BrowserWindow): { id: string; pid: number } {
+  startServer(
+    command: string,
+    cwd: string,
+    mainWindow?: BrowserWindow,
+    env?: Record<string, string>
+  ): { id: string; pid: number } {
     const target = mainWindow ?? this.mainWindow;
     if (!target || target.isDestroyed()) throw new Error('No window available for a background terminal.');
     const id = `server_${Date.now()}_${++this.backgroundCounter}`;
-    this.createTerminal(id, cwd, target);
+    this.createTerminal(id, cwd, target, undefined, env);
     const instance = this.terminals.get(id);
     // A shell needs the newline to execute what is typed into it.
     this.write(id, `${command}\r`);
@@ -239,6 +257,17 @@ export class TerminalService {
   /** Terminals that are running something long-lived, oldest id first. */
   serverIds(): string[] {
     return Array.from(this.terminals.keys()).filter((id) => id.startsWith('server_'));
+  }
+
+  /**
+   * The folder a terminal was opened in, or null once it is gone.
+   *
+   * This is what attributes a printed address to a project: the server that
+   * prints it was started in a folder, and that folder is the only evidence of
+   * whose server it is.
+   */
+  cwdFor(id: string): string | null {
+    return this.terminals.get(id)?.cwd ?? null;
   }
 
   /** True while the given terminal still has a live process behind it. */

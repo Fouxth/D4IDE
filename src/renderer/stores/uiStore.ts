@@ -39,7 +39,9 @@ export const useUiStore = create<UiState>((set) => ({
   workspaceMode: 'agent',
   leftPanelOpen: true,
   rightPanelOpen: true,
-  rightPanelTab: 'queue',
+  // Opens on Preview: the panel's job is "show me the thing I just built", and
+  // the queue is empty until the agent starts working.
+  rightPanelTab: 'preview',
   explorerOpen: true,
   explorerWidth: 240,
   outlineOpen: true,

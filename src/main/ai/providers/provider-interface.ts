@@ -55,7 +55,18 @@ export interface ProviderRef {
 /** Maps an HTTP failure to a stable, translatable error kind. */
 export function classifyHttpError(status: number, body = ''): ProviderErrorKind {
   const lower = body.toLowerCase();
-  if (status === 401 || status === 403) return 'invalid_key';
+  if (status === 401) return 'invalid_key';
+  if (status === 403) {
+    // A 403 that names the account's plan or entitlement is the *model* being
+    // gated, not the key being wrong: subscription gateways answer this way for
+    // models outside the plan (an opt-in model, a coding-plan-only id). Calling
+    // that "invalid key" sent users re-typing a perfectly good key — and the
+    // next real chat request worked, which is how status and reality diverged.
+    if (/(plan|entitle|permission|upgrade|not include|not allowed|not covered|subscription)/i.test(lower)) {
+      return 'model_not_found';
+    }
+    return 'invalid_key';
+  }
   if (status === 429) return 'rate_limit';
   if (status === 404) {
     if (lower.includes('model')) return 'model_not_found';

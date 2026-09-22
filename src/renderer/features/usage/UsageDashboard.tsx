@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { RefreshCw, Download, Trash2, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Download, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useUsageStore } from '../../stores/usageStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
 import { formatTokens, formatUsd, formatRelativeTime, formatDuration } from '../../lib/format';
 import { UsageBucket } from '../../../shared/types';
+import { RunReports } from './RunReports';
 
 const BucketTable: React.FC<{ title: string; buckets: UsageBucket[] }> = ({ title, buckets }) => {
   const { t } = useTranslation();
@@ -43,7 +44,10 @@ const BucketTable: React.FC<{ title: string; buckets: UsageBucket[] }> = ({ titl
   );
 };
 
-export const UsageDashboard: React.FC = () => {
+export const UsageDashboard: React.FC<{
+  /** True when the page above already carries this heading (Settings → General). */
+  embedded?: boolean;
+}> = ({ embedded }) => {
   const { t } = useTranslation();
   const { summary, load, reset, isLoading } = useUsageStore();
   const { settings, updateSettings } = useSettingsStore();
@@ -57,7 +61,6 @@ export const UsageDashboard: React.FC = () => {
     return <div className="text-center py-10 text-d4-dimmed text-xs">{t('usage.loading')}</div>;
   }
 
-  const budget = summary.budget;
   const totals = [
     { label: t('usage.today'), value: summary.today },
     { label: t('usage.month'), value: summary.month },
@@ -71,9 +74,9 @@ export const UsageDashboard: React.FC = () => {
         exportedAt: new Date().toISOString(),
         summary,
         settings: {
-          dailyBudget: settings.dailyBudget,
-          monthlyBudget: settings.monthlyBudget,
-          perRequestBudget: settings.perRequestBudget
+          thriftMode: settings.thriftMode,
+          contextTokenBudget: settings.contextTokenBudget,
+          runTokenBudget: settings.runTokenBudget
         }
       };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -93,8 +96,12 @@ export const UsageDashboard: React.FC = () => {
     <div className="space-y-5 select-text">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-d4-text">{t('usage.title')}</h3>
-          <p className="text-[11px] text-d4-dimmed mt-0.5">{t('usage.subtitle')}</p>
+          {!embedded && (
+            <>
+              <h3 className="text-sm font-semibold text-d4-text">{t('usage.title')}</h3>
+              <p className="text-[11px] text-d4-dimmed mt-0.5">{t('usage.subtitle')}</p>
+            </>
+          )}
         </div>
         <div className="flex items-center space-x-2">
           <button
@@ -202,106 +209,7 @@ export const UsageDashboard: React.FC = () => {
         />
       </div>
 
-      <div className="bg-d4-surface border border-d4-border rounded-md p-3 space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="text-[11px] uppercase font-semibold text-d4-dimmed">{t('usage.budgets')}</div>
-          <label className="flex items-center space-x-1.5 text-[11px] text-d4-muted cursor-pointer">
-            <input
-              type="checkbox"
-              checked={settings.budgetHardStop}
-              onChange={(e) => updateSettings({ budgetHardStop: e.target.checked })}
-              className="accent-teal-500 w-3 h-3"
-            />
-            <span>{t('usage.hardStop')}</span>
-          </label>
-        </div>
-
-        <label className="flex items-start gap-2 text-[11px] text-d4-muted cursor-pointer">
-          <input
-            type="checkbox"
-            checked={settings.autoThriftOnBudget !== false}
-            onChange={(e) => updateSettings({ autoThriftOnBudget: e.target.checked })}
-            className="accent-teal-500 w-3 h-3 mt-0.5"
-          />
-          <span>
-            <span className="text-d4-text">{t('usage.autoThrift')}</span>
-            <span className="block text-d4-dimmed">{t('usage.autoThriftHint')}</span>
-          </span>
-        </label>
-
-        <div className="grid grid-cols-3 gap-3">
-          <label className="space-y-1">
-            <span className="text-[10px] text-d4-dimmed uppercase">{t('usage.perRequest')} ($)</span>
-            <input
-              type="number"
-              step="0.1"
-              value={settings.perRequestBudget}
-              onChange={(e) => updateSettings({ perRequestBudget: parseFloat(e.target.value) || 0 })}
-              className="w-full bg-d4-panel border border-d4-border rounded px-2 py-1.5 text-xs font-mono text-d4-text outline-none"
-            />
-          </label>
-          <label className="space-y-1">
-            <span className="text-[10px] text-d4-dimmed uppercase">{t('usage.daily')} ($)</span>
-            <input
-              type="number"
-              step="0.5"
-              value={settings.dailyBudget}
-              onChange={(e) => updateSettings({ dailyBudget: parseFloat(e.target.value) || 0 })}
-              className="w-full bg-d4-panel border border-d4-border rounded px-2 py-1.5 text-xs font-mono text-d4-text outline-none"
-            />
-          </label>
-          <label className="space-y-1">
-            <span className="text-[10px] text-d4-dimmed uppercase">{t('usage.monthly')} ($)</span>
-            <input
-              type="number"
-              step="1"
-              value={settings.monthlyBudget}
-              onChange={(e) => updateSettings({ monthlyBudget: parseFloat(e.target.value) || 0 })}
-              className="w-full bg-d4-panel border border-d4-border rounded px-2 py-1.5 text-xs font-mono text-d4-text outline-none"
-            />
-          </label>
-        </div>
-
-        <div className="space-y-1">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="text-d4-muted">{t('usage.daily')}</span>
-            <span className="font-mono text-d4-text">
-              {formatUsd(budget.dailySpent)} / {formatUsd(budget.daily)} ({Math.round(budget.dailyPct * 100)}%)
-            </span>
-          </div>
-          <div className="w-full bg-d4-subtle h-2 rounded-full overflow-hidden">
-            <div
-              className={`h-full ${budget.dailyPct >= 1 ? 'bg-red-400' : budget.dailyPct >= 0.8 ? 'bg-amber-400' : 'bg-d4-accent'}`}
-              style={{ width: `${Math.min(budget.dailyPct, 1) * 100}%` }}
-            />
-          </div>
-        </div>
-
-        <div className="space-y-1">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="text-d4-muted">{t('usage.monthly')}</span>
-            <span className="font-mono text-d4-text">
-              {formatUsd(budget.monthlySpent)} / {formatUsd(budget.monthly)} ({Math.round(budget.monthlyPct * 100)}%)
-            </span>
-          </div>
-          <div className="w-full bg-d4-subtle h-2 rounded-full overflow-hidden">
-            <div
-              className={`h-full ${budget.monthlyPct >= 1 ? 'bg-red-400' : budget.monthlyPct >= 0.8 ? 'bg-amber-400' : 'bg-d4-accent'}`}
-              style={{ width: `${Math.min(budget.monthlyPct, 1) * 100}%` }}
-            />
-          </div>
-        </div>
-
-        {budget.exceeded && (
-          <div className="text-[11px] p-2 rounded border bg-red-500/10 border-red-500/30 text-red-400 flex items-start space-x-1.5">
-            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-            <span>
-              {t('usage.budgetExceeded')}
-              {settings.budgetHardStop ? ` ${t('usage.hardStopActive')}` : ` ${t('usage.hardStopOff')}`}
-            </span>
-          </div>
-        )}
-      </div>
+      <RunReports records={summary.recent} />
 
       <BucketTable title={t('usage.byProvider')} buckets={summary.byProvider} />
       <BucketTable title={t('usage.byModel')} buckets={summary.byModel} />

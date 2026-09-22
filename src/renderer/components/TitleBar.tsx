@@ -11,18 +11,25 @@ import {
   Command,
   History,
   Settings,
+  MessageSquare,
   Bot,
   Code2,
   Columns3,
   Terminal as TerminalIcon,
   Trash2,
-  Pencil
+  Pencil,
+  FolderPlus,
+  XCircle,
+  ListX
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useProject } from '../stores/projectStore';
 import { useSessionsStore } from '../stores/sessionsStore';
 import { useAgentStore } from '../stores/agentStore';
 import { presenceFor, presenceDotClass } from '../lib/session-presence';
+import { projectInitials } from '../lib/session-badge';
+import { bindTabMenu, otherOpenCount, tabMenuEntries, TabMenuAction } from '../lib/tab-menu';
+import { ContextMenu, useContextMenu } from './ContextMenu';
 import { WorkspaceMode } from '../../shared/types';
 
 interface TitleBarProps {
@@ -34,7 +41,10 @@ interface TitleBarProps {
   onToggleLeftPanel: () => void;
   outlineOpen: boolean;
   onToggleOutline: () => void;
-  onNewSession: () => void;
+  /** A new thread in the project that is open (the + on the strip, Ctrl+T). */
+  onNewThread: () => void;
+  /** A new space: pick a project folder (the + on the rail, and the right-click menu). */
+  onNewSpace: () => void;
   onOpenSearch: () => void;
   onOpenPalette: () => void;
   onOpenSessions: () => void;
@@ -61,7 +71,8 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   onToggleLeftPanel,
   outlineOpen,
   onToggleOutline,
-  onNewSession,
+  onNewThread,
+  onNewSpace,
   onOpenSearch,
   onOpenPalette,
   onOpenSessions,
@@ -71,7 +82,19 @@ export const TitleBar: React.FC<TitleBarProps> = ({
 }) => {
   const { t } = useTranslation();
   const { projectPath } = useProject((s) => ({ projectPath: s.projectPath }));
-  const { tabs, activeId, select, close, rename } = useSessionsStore();
+  const { tabs, activeId, select, close, closeOthers, rename } = useSessionsStore();
+
+  // A drag of a maximized window is followed in the main process; this is what
+  // tells it to stop when the button comes up anywhere on the page.
+  useEffect(() => {
+    const end = () => window.electronAPI?.endWindowDrag?.();
+    window.addEventListener('mouseup', end);
+    window.addEventListener('blur', end);
+    return () => {
+      window.removeEventListener('mouseup', end);
+      window.removeEventListener('blur', end);
+    };
+  }, []);
   const agentStatus = useAgentStore((st) => st.status);
   const liveSessionId = useAgentStore((st) => st.sessionId);
   // A dot is shown only on the tab whose conversation is actually running —
@@ -79,11 +102,10 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   const presence = presenceFor(agentStatus) && liveSessionId ? presenceFor(agentStatus) : null;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  // The + menu mirrors the Freebuff pattern: a new space, a rename of the
-  // space that is open, and closing it. Rename runs in a small dialog so a
-  // long name is typed and edited comfortably.
-  const [spaceMenuOpen, setSpaceMenuOpen] = useState(false);
-  const spaceMenuRef = useRef<HTMLDivElement>(null);
+  // The + makes a thread in the project that is open. Creating a *space* (a new
+  // project folder) is a different, rarer act: it has its own + on the rail and
+  // sits behind every right-click, so the two are never one stray click apart.
+  const spaceMenu = useContextMenu();
   // Double-click a tab to rename it in place — the dialog stays for the menu
   // item, but the direct gesture is faster and is what Freebuff uses.
   const [inlineEditId, setInlineEditId] = useState<string | null>(null);
@@ -110,25 +132,26 @@ export const TitleBar: React.FC<TitleBarProps> = ({
     };
   }, [menuOpen]);
 
-  useEffect(() => {
-    if (!spaceMenuOpen) return;
-    const onDown = (event: MouseEvent) => {
-      if (!spaceMenuRef.current?.contains(event.target as Node)) setSpaceMenuOpen(false);
+  /** Right-clicking a tab acts on *that* tab, not on whichever one is active. */
+  const openSpaceMenu = (event: React.MouseEvent, tabId: string) => {
+    const handlers: Record<TabMenuAction, () => void> = {
+      'new-space': onNewSpace,
+      rename: () => openRenameDialog(tabId),
+      close: () => close(tabId),
+      'close-others': () => closeOthers(tabId)
     };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setSpaceMenuOpen(false);
+    const entries = tabMenuEntries({ tabId, otherOpenCount: otherOpenCount(tabs.map((tab) => tab.id), tabId) });
+    const icons: Partial<Record<TabMenuAction, React.ComponentType<{ className?: string }>>> = {
+      'new-space': FolderPlus,
+      rename: Pencil,
+      close: XCircle,
+      'close-others': ListX
     };
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [spaceMenuOpen]);
+    spaceMenu.open(event, bindTabMenu(entries, handlers, (key) => t(key), icons), t('nav.spaceMenu'));
+  };
 
-  const openRenameDialog = () => {
-    setSpaceMenuOpen(false);
-    const tab = tabs.find((item) => item.id === activeId);
+  const openRenameDialog = (tabId: string) => {
+    const tab = tabs.find((item) => item.id === tabId);
     if (!tab) return;
     setRenameTab({ id: tab.id, title: tab.title });
     setRenameValue(tab.title);
@@ -178,6 +201,13 @@ export const TitleBar: React.FC<TitleBarProps> = ({
 
   return (
     <header
+      onMouseDown={(event) => {
+        // Left button only, and never on a control: the drag region is the bar
+        // itself, and a click on a button must not start moving the window.
+        if (event.button !== 0) return;
+        if ((event.target as HTMLElement).closest('button, input, a, [data-no-drag]')) return;
+        window.electronAPI?.beginWindowDrag?.();
+      }}
       className="h-10 shrink-0 bg-d4-bg border-b border-d4-border-subtle flex items-stretch pl-1.5 pr-0 text-xs text-d4-muted z-50 select-none"
       style={{ WebkitAppRegion: 'drag' } as any}
     >
@@ -191,11 +221,15 @@ export const TitleBar: React.FC<TitleBarProps> = ({
         </button>
       </div>
 
-      {/* ------------------------------------------------------- session tabs */}
-      <div
-        className="flex-1 min-w-0 flex items-end gap-1 overflow-x-auto pl-1 pt-1.5"
-        style={{ WebkitAppRegion: 'no-drag' } as any}
-      >
+      {/*
+       * The strip is deliberately draggable.
+       *
+       * It spans everything between the two icon clusters, and marking the whole
+       * of it `no-drag` left a few pixels of movable title bar behind the folder
+       * icon — so the window could not be moved by the bar at all, which is what
+       * "I click the bar and nothing happens" was. The tabs themselves opt out.
+       */}
+      <div className="flex-1 min-w-0 flex items-end gap-1 overflow-x-auto pl-1 pt-1.5">
         {tabs.length === 0 && (
           <div className="px-2 pb-1.5 text-[12px] text-d4-dimmed truncate">
             {t('app.name')}
@@ -206,6 +240,10 @@ export const TitleBar: React.FC<TitleBarProps> = ({
         {tabs.map((tab) => {
           const isActive = activeId === tab.id;
           const editing = inlineEditId === tab.id;
+          // The badge names the project this conversation belongs to. It used to
+          // say `D4` on every tab, so a strip of a different project's sessions
+          // all claimed to be the app's own — a badge nobody could act on.
+          const badge = projectInitials(tab.projectPath ?? projectPath);
           // Only the tab whose conversation is live carries a dot; every other
           // tab's state is unknown to this renderer and must not be guessed.
           const tabPresence = tab.id === liveSessionId ? presence : null;
@@ -221,7 +259,11 @@ export const TitleBar: React.FC<TitleBarProps> = ({
                 setInlineEditId(tab.id);
                 setInlineValue(tab.title);
               }}
-              title={tab.title}
+              onContextMenu={(event) => openSpaceMenu(event, tab.id)}
+              /* A draft has no title yet: the tooltip says what the tab is
+                 without putting words on a tab the user has not written in. */
+              title={tab.title || t('nav.newSession')}
+              style={{ WebkitAppRegion: 'no-drag' } as any}
               className={`group relative flex items-center gap-1.5 pl-2 pr-1 h-7 max-w-[210px] min-w-[120px] cursor-pointer rounded-t-md border border-b-0 transition-colors ${
                 isActive
                   ? 'bg-d4-panel border-d4-border text-d4-text'
@@ -234,7 +276,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
                     isActive ? 'bg-d4-accent text-black' : 'bg-d4-surface text-d4-dimmed'
                   }`}
                 >
-                  D4
+                  {badge || <MessageSquare className="w-2 h-2" />}
                 </span>
                 {tabPresence && (
                   <span
@@ -282,48 +324,19 @@ export const TitleBar: React.FC<TitleBarProps> = ({
        * which happens at the window's minimum width (1024px) — and a button nobody
        * can see is a button nobody can press.
        */}
-      <div className="relative shrink-0 self-end mb-1 ml-0.5" ref={spaceMenuRef}>
+      <div className="shrink-0 self-end mb-1 ml-0.5">
         <button
-          onClick={() => setSpaceMenuOpen((open) => !open)}
-          title={t('nav.newSession')}
-          className={`w-6 h-6 flex items-center justify-center rounded-sm text-d4-dimmed hover:text-d4-text hover:bg-d4-panel transition-colors ${spaceMenuOpen ? 'text-d4-text bg-d4-panel' : ''}`}
+          onClick={onNewThread}
+          title={`${t('nav.newThreadInProject', { project: projectName ?? t('nav.sessionDefault') })}  ·  Ctrl+T`}
+          aria-label={t('nav.newThread')}
+          className="w-6 h-6 flex items-center justify-center rounded-sm text-d4-dimmed hover:text-d4-text hover:bg-d4-panel transition-colors"
           style={{ WebkitAppRegion: 'no-drag' } as any}
         >
           <Plus className="w-3.5 h-3.5" />
         </button>
-
-        {spaceMenuOpen && (
-          <div className="absolute left-0 top-8 w-56 bg-d4-panel border border-d4-border rounded-md shadow-2xl p-1 z-50">
-            <button
-              onClick={() => {
-                setSpaceMenuOpen(false);
-                onNewSession();
-              }}
-              className="w-full px-2.5 py-2 text-left text-[12px] text-d4-text hover:bg-d4-surface rounded-sm transition-colors"
-            >
-              {projectName ? t('nav.spaceNewIn', { project: projectName }) : t('nav.spaceNew')}
-            </button>
-            <button
-              onClick={openRenameDialog}
-              disabled={!activeId || activeId.startsWith('__')}
-              className="w-full px-2.5 py-2 text-left text-[12px] text-d4-text hover:bg-d4-surface rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
-            >
-              {t('nav.spaceRename')}
-            </button>
-            <div className="my-1 h-px bg-d4-border-subtle" />
-            <button
-              onClick={() => {
-                setSpaceMenuOpen(false);
-                if (activeId) close(activeId);
-              }}
-              disabled={!activeId}
-              className="w-full px-2.5 py-2 text-left text-[12px] text-d4-text hover:bg-d4-surface rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
-            >
-              {t('nav.spaceClose')}
-            </button>
-          </div>
-        )}
       </div>
+
+      <ContextMenu request={spaceMenu.request} onClose={spaceMenu.close} />
 
       {/* ------------------------------------------------------- right cluster */}
       <div
@@ -371,14 +384,26 @@ export const TitleBar: React.FC<TitleBarProps> = ({
 
         <div className="w-px h-4 bg-d4-border-subtle mx-1" />
 
-        <button onClick={() => window.electronAPI?.minimize()} className="d4-icon-button w-7 h-7">
+        <button
+          onClick={() => window.electronAPI?.minimize()}
+          title={t('common.minimizeWindow')}
+          aria-label={t('common.minimizeWindow')}
+          className="d4-icon-button w-7 h-7"
+        >
           <Minus className="w-3.5 h-3.5" />
         </button>
-        <button onClick={() => window.electronAPI?.maximize()} className="d4-icon-button w-7 h-7">
+        <button
+          onClick={() => window.electronAPI?.maximize()}
+          title={t('common.maximizeWindow')}
+          aria-label={t('common.maximizeWindow')}
+          className="d4-icon-button w-7 h-7"
+        >
           <Square className="w-3 h-3" />
         </button>
         <button
           onClick={() => window.electronAPI?.close()}
+          title={t('common.closeWindow')}
+          aria-label={t('common.closeWindow')}
           className="w-7 h-7 flex items-center justify-center rounded-sm text-d4-muted hover:text-white hover:bg-d4-error transition-colors"
         >
           <X className="w-3.5 h-3.5" />

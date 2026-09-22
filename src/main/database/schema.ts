@@ -24,7 +24,7 @@ import { APP_VERSION } from '../../shared/version';
  */
 
 /** Current revision. Bump this and append a step whenever the shape changes. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 
 export const DATABASE_FILE = 'd4ide.sqlite';
 export const BACKUP_DIR = 'backups';
@@ -200,8 +200,65 @@ const V2 = `
   CREATE INDEX IF NOT EXISTS idx_queue_position ON queue_items(status, position);
 `;
 
+/**
+ * v3 — give the audit trail its own text id.
+ *
+ * `tool_audit.id` is `INTEGER PRIMARY KEY AUTOINCREMENT`, and the runtime hands
+ * `insertAudit` ids like `a_1789741112055`. SQLite refuses a non-integer value
+ * for a rowid alias with **SQLITE_MISMATCH (datatype mismatch)** — so every
+ * attempt to record a tool call threw, the audit trail stayed empty, and because
+ * the throw happened inside the run's try block it ended runs that had merely
+ * been *refused* a tool. The caller's id moves to its own `entry_id TEXT` column
+ * and the rowid goes back to being a rowid.
+ *
+ * The copy keeps whatever the old table managed to collect, and names those rows
+ * the way the JSON store would have.
+ */
+const V3 = `
+  ALTER TABLE tool_audit RENAME TO tool_audit_v2;
+
+  CREATE TABLE IF NOT EXISTS tool_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id TEXT,
+    session_id TEXT,
+    tool_name TEXT,
+    args_preview TEXT,
+    mode TEXT,
+    allowed INTEGER,
+    requires_approval INTEGER,
+    decision TEXT,
+    reason TEXT,
+    duration_ms INTEGER,
+    created_at INTEGER
+  );
+
+  INSERT OR IGNORE INTO tool_audit
+    (entry_id, session_id, tool_name, args_preview, mode, allowed, requires_approval, decision, reason, duration_ms, created_at)
+    SELECT printf('a_%d', id), session_id, tool_name, args_preview, mode, allowed, requires_approval, decision, reason, duration_ms, created_at
+    FROM tool_audit_v2;
+
+  DROP TABLE tool_audit_v2;
+
+  CREATE INDEX IF NOT EXISTS idx_audit_created ON tool_audit(created_at);
+`;
+
+/**
+ * v4 — the completion report lives with the request it is about.
+ *
+ * The end-of-run summary used to be a card in the conversation: it interrupted
+ * the transcript, it was lost when the session was reopened from the wrong
+ * angle, and it sat nowhere near the cost it describes. It is a report about one
+ * request — changed files, validations that really ran, tokens spent — so it is
+ * stored on that request's usage row and shown in the usage view, which already
+ * answers "what did this cost me".
+ */
+const V4 = `
+  ALTER TABLE usage_records ADD COLUMN summary TEXT;
+  ALTER TABLE usage_records ADD COLUMN summary_request TEXT;
+`;
+
 /** Ordered migration steps: index 0 is revision 1. */
-export const MIGRATIONS: readonly string[] = [V1, V2];
+export const MIGRATIONS: readonly string[] = [V1, V2, V3, V4];
 
 /**
  * Which revisions a file still needs. A brand-new file reports `user_version =

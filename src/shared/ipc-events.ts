@@ -3,6 +3,15 @@
 export const IPC_CHANNELS = {
   // Window & System
   WINDOW_MINIMIZE: 'window:minimize',
+  /**
+   * A drag started on the title bar, and ended.
+   *
+   * A frameless window drags itself, but a *maximized* one has nothing to drag:
+   * the OS refuses to move it until it is restored, so the title bar felt dead.
+   * These two let the main process restore the window and follow the cursor.
+   */
+  WINDOW_DRAG_START: 'window:drag-start',
+  WINDOW_DRAG_END: 'window:drag-end',
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_CLOSE: 'window:close',
 
@@ -11,8 +20,14 @@ export const IPC_CHANNELS = {
   PROJECT_OPEN_PATH: 'project:open-path',
   PROJECT_GET_TREE: 'project:get-tree',
   PROJECT_RECENT_LIST: 'project:recent-list',
+  /** The folders kept on the rail (spaces), in the order they are shown. */
+  PROJECT_SPACES_LIST: 'project:spaces-list',
+  /** Takes one folder off the rail. The folder itself is untouched. */
+  PROJECT_SPACE_FORGET: 'project:space-forget',
   /** What database the open project is built on, read from the project's files. */
   PROJECT_DATABASE: 'project:database',
+  /** Conversation-starter chips built from the project's real state (spec §5). */
+  PROJECT_SUGGESTIONS: 'project:suggestions',
   FILE_READ: 'file:read',
   FILE_WRITE: 'file:write',
   FILE_DELETE: 'file:delete',
@@ -53,6 +68,14 @@ export const IPC_CHANNELS = {
   PROVIDERS_GET: 'providers:get',
   PROVIDERS_SAVE: 'providers:save',
   PROVIDERS_TEST: 'providers:test',
+  /** Tests every ready provider once and reports one row per vendor. */
+  PROVIDERS_TEST_ALL: 'providers:test-all',
+  /**
+   * The periodic watch on the provider the user is talking to. Pushed after
+   * every probe; `PROVIDER_HEALTH_PROBE` asks for one right now.
+   */
+  PROVIDER_HEALTH_STATUS: 'providers:health-status',
+  PROVIDER_HEALTH_PROBE: 'providers:health-probe',
   PROVIDERS_REFRESH_MODELS: 'providers:refresh-models',
   PROVIDERS_SET_KEY: 'providers:set-key',
   PROVIDERS_DELETE: 'providers:delete',
@@ -72,6 +95,8 @@ export const IPC_CHANNELS = {
   AGENT_CHOOSE_DESIGN: 'agent:choose-design',
   /** Answers the step gate between build steps (spec §35). */
   AGENT_PLAN_STEP: 'agent:plan-step',
+  /** The user's answer to a question card the run is parked on. */
+  AGENT_ANSWER_QUESTIONS: 'agent:answer-questions',
 
   // Sign-in (spec §7)
   AUTH_STATUS: 'auth:status',
@@ -101,6 +126,10 @@ export const IPC_CHANNELS = {
   SKILLS_LIST: 'skills:list',
   SKILLS_SAVE: 'skills:save',
   SKILLS_DELETE: 'skills:delete',
+  /** The user's own rules, in two plain markdown files (one per scope). */
+  RULES_GET: 'rules:get',
+  RULES_SAVE: 'rules:save',
+  RULES_REVEAL: 'rules:reveal',
   MCP_LIST: 'mcp:list',
   MCP_CALL: 'mcp:call',
   MCP_START: 'mcp:start',
@@ -112,8 +141,15 @@ export const IPC_CHANNELS = {
   // Preview
   PREVIEW_CAPTURE: 'preview:capture',
   PREVIEW_DETECT: 'preview:detect',
+  /** Starts the project's own dev script in a background terminal. */
+  PREVIEW_LAUNCH: 'preview:launch',
   /** A local server address the app just learned about, pushed to the UI. */
   PREVIEW_DISCOVERED: 'preview:discovered',
+  /**
+   * What the app would run instead of a command typed into the terminal — the
+   * same project port the Launch button would choose.
+   */
+  PREVIEW_PLAN: 'preview:plan',
 
   // Mission: session-scoped context (spec §40)
   MISSION_GET: 'mission:get',

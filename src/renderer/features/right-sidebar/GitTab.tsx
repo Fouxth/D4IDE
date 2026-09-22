@@ -44,8 +44,11 @@ export const GitTab: React.FC = () => {
     setLoading(true);
     try {
       const next = await api.gitStatus(projectPath);
-      setStatus(next && next.branch ? next : null);
-      setNotRepo(!next || !next.branch);
+      // `isRepo` is the honest answer. A fresh repository with no commit yet has
+      // no branch name either, and calling that "not a repository" was wrong.
+      const repo = next?.isRepo ?? !!next?.branch;
+      setStatus(repo ? next! : null);
+      setNotRepo(!repo);
     } catch {
       // A folder that is not a repository is a normal state, not an error.
       setStatus(null);
@@ -141,6 +144,18 @@ export const GitTab: React.FC = () => {
           <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      {/*
+       * A repository with nowhere to push is a state worth naming: the status
+       * bar stays quiet about git in that case (spec: no remote, nothing to
+       * show), so this is the one place the user is told why.
+       */}
+      {!status.remote && (
+        <p className="text-[11px] text-d4-dimmed leading-relaxed">
+          {t('git.noRemote')}
+          <code className="block mt-1 font-mono text-[10px] text-d4-muted">git remote add origin &lt;url&gt;</code>
+        </p>
+      )}
 
       {rows.length === 0 ? (
         <p className="text-[11px] text-d4-dimmed py-2">{t('git.nothingToCommit')}</p>

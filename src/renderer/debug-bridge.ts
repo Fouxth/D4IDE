@@ -1,5 +1,8 @@
 import { useAgentStore } from './stores/agentStore';
+import { useProjectStore } from './stores/projectStore';
 import { useSessionsStore } from './stores/sessionsStore';
+import { useUiStore } from './stores/uiStore';
+import { useUpdateStore } from './stores/updateStore';
 
 /**
  * A read/write window handle onto the real stores, for verification harnesses
@@ -10,11 +13,22 @@ import { useSessionsStore } from './stores/sessionsStore';
  * still react. The bridge only exists when the bundle is built with
  * `D4IDE_DEBUG_BRIDGE=1` — normal and packaged builds never expose it, and a
  * test pins that gate.
+ *
+ * The update store is here for the same reason: an update card can only be seen
+ * when a real feed publishes a newer version, and the three faces of that card
+ * (offered, downloading, downloaded) must all be checkable without shipping a
+ * release for each one. `setState` is zustand's own, so the harness writes the
+ * same shape the main process sends — it does not bypass any rule in the card.
  */
 export function installDebugBridge(): void {
   if (!import.meta.env.VITE_DEBUG_BRIDGE) return;
   (window as unknown as Record<string, unknown>).__d4ide = {
     agent: useAgentStore,
-    sessions: useSessionsStore
+    sessions: useSessionsStore,
+    update: useUpdateStore,
+    // Which folder is open decides which sessions the strip may show, so a
+    // harness has to be able to set it directly and then read the strip back.
+    project: useProjectStore,
+    ui: useUiStore
   };
 }

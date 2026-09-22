@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { auditRow } from '../src/main/database/sqlite-store';
 import {
   BACKUP_PREFIX,
   KEEP_BACKUPS,
@@ -40,8 +41,10 @@ describe('schema versioning', () => {
   });
 
   it('plans every step for a new file and none for an up-to-date one', () => {
-    expect(planMigrations(0)).toEqual([1, 2]);
-    expect(planMigrations(1)).toEqual([2]);
+    expect(planMigrations(0)).toEqual([1, 2, 3, 4]);
+    expect(planMigrations(1)).toEqual([2, 3, 4]);
+    expect(planMigrations(2)).toEqual([3, 4]);
+    expect(planMigrations(3)).toEqual([4]);
     expect(planMigrations(SCHEMA_VERSION)).toEqual([]);
   });
 
@@ -53,8 +56,44 @@ describe('schema versioning', () => {
   });
 
   it('treats a missing or nonsense revision as brand new', () => {
-    expect(planMigrations(-1)).toEqual([1, 2]);
-    expect(planMigrations(Number.NaN)).toEqual([1, 2]);
+    expect(planMigrations(-1)).toEqual([1, 2, 3, 4]);
+    expect(planMigrations(Number.NaN)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('moves the audit id off the rowid, which only accepts integers', () => {
+    // `a_1789…` in an INTEGER PRIMARY KEY is SQLITE_MISMATCH: it threw inside the
+    // run loop, so a refused tool call ended the run and the trail stayed empty.
+    const step = MIGRATIONS[2];
+    expect(step).toContain('entry_id TEXT');
+    expect(step).toMatch(/SELECT printf\('a_%d', id\)/);
+    expect(step).toContain('DROP TABLE tool_audit_v2');
+  });
+
+  /**
+   * The values bound into `tool_audit`.
+   *
+   * The caller's id is text, so it must land in its own column: the rowid alias
+   * only accepts integers, and a driver that refuses the value throws inside the
+   * run that was only trying to record a tool call.
+   */
+  it('binds the caller’s audit id into entry_id, never into the rowid', () => {
+    const row = auditRow({
+      id: 'a_1789741112055',
+      sessionId: 's_1',
+      toolName: 'run_terminal',
+      argsPreview: '{"command":"rm -rf ."}',
+      mode: 'safe',
+      allowed: false,
+      requiresApproval: true,
+      decision: 'rejected',
+      reason: 'standing law',
+      timestamp: 1789741112055
+    });
+    expect(row.entry_id).toBe('a_1789741112055');
+    expect(Object.keys(row)).not.toContain('id');
+    expect(row.allowed).toBe(0);
+    expect(row.requires_approval).toBe(1);
+    expect(row.created_at).toBe(1789741112055);
   });
 
   it('records which revision was applied, with the app version', () => {

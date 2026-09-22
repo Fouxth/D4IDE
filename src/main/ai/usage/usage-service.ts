@@ -1,6 +1,4 @@
 import {
-  AppSettings,
-  BudgetStatus,
   ModelInfo,
   ProviderConfig,
   UsageAggregate,
@@ -90,34 +88,13 @@ export function startOfMonth(timestamp: number): number {
   return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
 }
 
-export function evaluateBudget(settings: AppSettings, todayCost: number, monthCost: number): BudgetStatus {
-  const daily = settings.dailyBudget || 0;
-  const monthly = settings.monthlyBudget || 0;
-  const warnThreshold = settings.budgetWarnThreshold || 0.8;
-  const dailyPct = daily > 0 ? todayCost / daily : 0;
-  const monthlyPct = monthly > 0 ? monthCost / monthly : 0;
-
-  return {
-    perRequest: settings.perRequestBudget || 0,
-    daily,
-    monthly,
-    warnThreshold,
-    hardStop: !!settings.budgetHardStop,
-    dailySpent: Number(todayCost.toFixed(6)),
-    monthlySpent: Number(monthCost.toFixed(6)),
-    dailyPct,
-    monthlyPct,
-    warn: dailyPct >= warnThreshold || monthlyPct >= warnThreshold,
-    exceeded: (daily > 0 && dailyPct >= 1) || (monthly > 0 && monthlyPct >= 1)
-  };
-}
-
-export function buildSummary(
-  records: UsageRecord[],
-  settings: AppSettings,
-  sessionId: string | null,
-  now = Date.now()
-): UsageSummary {
+/**
+ * The usage report.
+ *
+ * It takes no settings: there is nothing left to compare the totals against.
+ * Buckets, the session total and the recent list are all statements of fact.
+ */
+export function buildSummary(records: UsageRecord[], sessionId: string | null, now = Date.now()): UsageSummary {
   const today = records.filter((r) => isSameDay(r.timestamp, now));
   const month = records.filter((r) => r.timestamp >= startOfMonth(now));
   const session = sessionId ? records.filter((r) => r.sessionId === sessionId) : [];
@@ -133,8 +110,7 @@ export function buildSummary(
     byProvider: bucketBy(month, (r) => r.providerId, (r) => r.providerName || r.providerId),
     byModel: bucketBy(month, (r) => `${r.providerId}::${r.modelId}`, (r) => r.modelName || r.modelId),
     byProject: bucketBy(month, (r) => r.projectPath || 'unknown', (r) => r.projectPath || 'Unknown project'),
-    recent: [...records].sort((a, b) => b.timestamp - a.timestamp).slice(0, 25),
-    budget: evaluateBudget(settings, todayAggregate.cost, monthAggregate.cost)
+    recent: [...records].sort((a, b) => b.timestamp - a.timestamp).slice(0, 25)
   };
 }
 
@@ -145,13 +121,7 @@ export class UsageService {
   }
 
   summary(sessionId: string | null = null): UsageSummary {
-    return buildSummary(appStore.getUsageRecords(), appStore.getSettings(), sessionId);
-  }
-
-  /** Cost of a single request, used for per-request budget checks (spec §36). */
-  costOf(providerId: string, modelId: string, usage: CostInput): number {
-    const providers = appStore.getProviders();
-    return calculateCost(findModel(providers, providerId, modelId), usage);
+    return buildSummary(appStore.getUsageRecords(), sessionId);
   }
 }
 

@@ -19,7 +19,13 @@ interface McpToolSummary {
  * adds is what the file cannot express: whether the server is actually running,
  * what it announced, and the reason it refused to start.
  */
-export const McpTab: React.FC = () => {
+export const McpTab: React.FC<{
+  /**
+   * True when the page above already says what this is (Settings → Connectors),
+   * so this does not print a second heading with the same words in it.
+   */
+  embedded?: boolean;
+}> = ({ embedded }) => {
   const { t } = useTranslation();
   const { projectPath } = useProject((s) => ({ projectPath: s.projectPath }));
   const [servers, setServers] = useState<McpServerConfig[]>([]);
@@ -93,10 +99,12 @@ export const McpTab: React.FC = () => {
   return (
     <div className="space-y-4 select-text">
       <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold text-d4-text">{t('mcp.title')}</h3>
-          <p className="text-[11px] text-d4-dimmed mt-0.5 leading-relaxed">{t('mcp.subtitle')}</p>
-        </div>
+        {!embedded && (
+          <div>
+            <h3 className="text-sm font-semibold text-d4-text">{t('mcp.title')}</h3>
+            <p className="text-[11px] text-d4-dimmed mt-0.5 leading-relaxed">{t('mcp.subtitle')}</p>
+          </div>
+        )}
         <button onClick={refresh} className="d4-chip shrink-0" title={t('mcp.refresh')}>
           <RefreshCw className="w-3 h-3" />
           <span>{t('mcp.refresh')}</span>

@@ -1,4 +1,4 @@
-import { dialog, BrowserWindow, ipcMain, shell } from 'electron';
+import { dialog, BrowserWindow, ipcMain, screen, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { IPC_CHANNELS } from '../../shared/ipc-events';
@@ -8,7 +8,9 @@ import { terminalService } from '../terminal/terminal-service';
 import { gitService } from '../git/git-service';
 import { appStore } from '../database/store';
 import { providerManager } from '../ai/providers/provider-manager';
+import { providerHealthService } from '../ai/providers/health-check-service';
 import { agentRuntime } from '../ai/agent/agent-runtime';
+import { projectRulesPath, readRulesFile, userRulesPath, writeRulesFile } from '../ai/context/rules-files';
 import { usageService } from '../ai/usage/usage-service';
 import { mcpClient } from '../mcp/mcp-client';
 import { normalizeMcpConfig } from '../mcp/mcp-transport';
@@ -19,9 +21,23 @@ import { updateService } from '../updater/update-service';
 import { catalogRefreshService } from '../ai/providers/catalog-refresh';
 import { describeRefusals, planCheckpointRestore } from '../checkpoints/checkpoint-policy';
 import { builtinCommandSkills } from '../../shared/builtin-commands';
+import { splitSkillFile } from '../../shared/skills';
+import { devServerCommand, declaredPort } from '../../shared/dev-command';
+import { forgetSpace, rememberSpace } from '../../shared/spaces';
+import { buildProjectSuggestions } from '../../shared/project-suggestions';
+import { collectProjectContext, toSuggestionInput } from '../project/project-context';
 import { inspectProjectDatabase } from '../project/database-evidence';
 import { AuthProvider, AuthService } from '../auth/auth-service';
 import { previewRegistry } from '../preview/preview-registry';
+import {
+  describeProcesses,
+  listenPortsSnapshot,
+  mentionsProject,
+  portsForProject,
+  rankListeningPorts
+} from '../preview/port-scan';
+import { guardDevServerLaunch, planDevServerLaunch, scriptBodyFor } from '../preview/dev-server';
+import { applyUiScale } from '../ui-scale';
 import { readProjectMemory, writeProjectMemory, memorySkeleton } from '../project/project-memory';
 import { ProjectDesign, readProjectDesign, writeProjectDesign } from '../project/design-store';
 import { DesignStyle } from '../../shared/design-profiles';
@@ -32,13 +48,15 @@ import {
   Mission,
   PlanScope,
   PlanStepDecision,
+  QuestionAnswer,
   SkillItem,
   McpServerConfig,
   ProviderConfig,
   SessionTranscript
 } from '../../shared/types';
 
-const DEV_SERVER_PORTS = [3000, 3001, 4200, 5000, 5173, 5174, 8000, 8080, 8888, 4321];
+/** While a title-bar drag is in flight on a maximized window (see below). */
+let windowDragTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Image types the UI may inline, and the biggest one it will accept. */
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
@@ -62,15 +80,43 @@ async function probePort(port: number): Promise<boolean> {
   }
 }
 
+/**
+ * The ports whose owning process provably runs inside this project — strict
+ * evidence only, because this list is what a Launch press is refused on. A
+ * command line the OS would not give up proves nothing and must never count as
+ * "already running": the lenient attribution the detect handler uses would
+ * block launches on machines where `tasklist` answers nothing.
+ */
+async function attributedListenerPorts(projectPath: string): Promise<number[]> {
+  const listeners = await listenPortsSnapshot();
+  if (listeners.length === 0) return [];
+  const table = await describeProcesses(listeners.map((entry) => entry.pid));
+  return Array.from(
+    new Set(
+      listeners
+        .filter((entry) => mentionsProject(table.get(entry.pid)?.command ?? '', projectPath))
+        .map((entry) => entry.port)
+    )
+  );
+}
+
 export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   // Background terminals (the agent's dev servers) report into this window, and
   // every terminal's output is watched for the address a server bound to.
   terminalService.attachWindow(mainWindow);
   terminalService.onOutput((text, terminalId) => {
-    const discovered = previewRegistry.observe(text, terminalId);
+    // The folder the terminal was opened in is the only evidence of *whose*
+    // server printed this address, so it travels with it into the registry.
+    const discovered = previewRegistry.observe(text, terminalId, terminalService.cwdFor(terminalId) ?? undefined);
     for (const server of discovered) {
       if (mainWindow.isDestroyed()) break;
-      mainWindow.webContents.send(IPC_CHANNELS.PREVIEW_DISCOVERED, { url: server.url, source: server.source });
+      mainWindow.webContents.send(IPC_CHANNELS.PREVIEW_DISCOVERED, {
+        url: server.url,
+        source: server.source,
+        // The folder travels with the address so the panel can ignore a server
+        // that belongs to a project the user is not looking at.
+        folder: server.folder ?? null
+      });
       logService.info('app', 'Preview address discovered', { url: server.url, source: server.source });
     }
   });
@@ -87,24 +133,83 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   });
   ipcMain.handle(IPC_CHANNELS.WINDOW_CLOSE, () => mainWindow.close());
 
+  /**
+   * Dragging the title bar of a maximized window restores it, the way Windows
+   * does.
+   *
+   * A frameless window is moved by the OS, which simply refuses while the window
+   * is maximized — so the bar looked broken exactly when the window was in the
+   * state most people leave it in. Here the window is restored on mouse-down and
+   * then follows the pointer until the button is released: the offset is taken
+   * from where on the bar the drag started, so the window does not jump under the
+   * cursor.
+   */
+  ipcMain.on(IPC_CHANNELS.WINDOW_DRAG_START, () => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isMaximized()) return;
+    const grab = screen.getCursorScreenPoint();
+    const maximized = mainWindow.getBounds();
+    const ratio = maximized.width > 0 ? Math.min(Math.max((grab.x - maximized.x) / maximized.width, 0), 1) : 0.5;
+    mainWindow.unmaximize();
+    const restored = mainWindow.getBounds();
+    const offsetX = Math.round(restored.width * ratio);
+    const offsetY = Math.round(grab.y - maximized.y);
+
+    if (windowDragTimer) clearInterval(windowDragTimer);
+    windowDragTimer = setInterval(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      const point = screen.getCursorScreenPoint();
+      mainWindow.setPosition(point.x - offsetX, point.y - offsetY);
+    }, 16);
+  });
+
+  ipcMain.on(IPC_CHANNELS.WINDOW_DRAG_END, () => {
+    if (!windowDragTimer) return;
+    clearInterval(windowDragTimer);
+    windowDragTimer = null;
+  });
+
   // ----------------------------------------------------- project & filesystem
+  /**
+   * Records a folder the user just opened.
+   *
+   * Both lists are written here, and here only: `recentProjects` is the capped
+   * shortcut list the picker offers, while `spaces` is the rail — every opened
+   * folder, kept until the user removes it. Doing it in the main process means
+   * every entry point (the picker, the rail's +, a prompt that needed a folder,
+   * a restored workspace) is covered by construction, rather than by remembering
+   * to call something in the renderer.
+   */
+  const recordOpenedFolder = (dir: string) => {
+    const settings = appStore.getSettings();
+    appStore.saveSettings({
+      recentProjects: Array.from(new Set([dir, ...settings.recentProjects])).slice(0, 10),
+      spaces: rememberSpace(settings.spaces ?? [], dir)
+    });
+  };
+
   ipcMain.handle(IPC_CHANNELS.PROJECT_OPEN_DIALOG, async () => {
     const res = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
     if (res.canceled || res.filePaths.length === 0) return null;
     const dir = res.filePaths[0];
-    const settings = appStore.getSettings();
-    appStore.saveSettings({ recentProjects: Array.from(new Set([dir, ...settings.recentProjects])).slice(0, 10) });
+    recordOpenedFolder(dir);
     return dir;
   });
 
   ipcMain.handle(IPC_CHANNELS.PROJECT_OPEN_PATH, (_event, projectPath: string) => {
     if (!projectPath || !fs.existsSync(projectPath)) return false;
-    const settings = appStore.getSettings();
-    appStore.saveSettings({ recentProjects: Array.from(new Set([projectPath, ...settings.recentProjects])).slice(0, 10) });
+    recordOpenedFolder(projectPath);
     return true;
   });
 
   ipcMain.handle(IPC_CHANNELS.PROJECT_RECENT_LIST, () => appStore.getSettings().recentProjects);
+
+  ipcMain.handle(IPC_CHANNELS.PROJECT_SPACES_LIST, () => appStore.getSettings().spaces ?? []);
+
+  ipcMain.handle(IPC_CHANNELS.PROJECT_SPACE_FORGET, (_event, projectPath: string) => {
+    const spaces = forgetSpace(appStore.getSettings().spaces ?? [], projectPath);
+    appStore.saveSettings({ spaces });
+    return spaces;
+  });
 
   ipcMain.handle(IPC_CHANNELS.PROJECT_GET_TREE, (_event, projectPath: string) => {
     if (!projectPath || !fs.existsSync(projectPath)) return null;
@@ -122,6 +227,21 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     } catch (error) {
       logService.warn('app', 'Project database inspection failed', { target, error: String(error) });
       return { scanned: [], databases: [], tooling: [] };
+    }
+  });
+
+  // Conversation starters for an empty transcript, built from the project's
+  // real state — git's working tree, recently touched files, TODO markers —
+  // rather than the same four buttons every project ever shows. Built here,
+  // where the disk is, and shipped as finished chips.
+  ipcMain.handle(IPC_CHANNELS.PROJECT_SUGGESTIONS, async (_event, projectPath?: string) => {
+    if (!projectPath || !fs.existsSync(projectPath)) return [];
+    try {
+      const context = await collectProjectContext(projectPath);
+      return buildProjectSuggestions(toSuggestionInput(context, appStore.getSettings().language));
+    } catch (error) {
+      logService.warn('app', 'Project suggestions failed', { projectPath, error: String(error) });
+      return [];
     }
   });
 
@@ -240,6 +360,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     ) {
       catalogRefreshService.reconfigure();
     }
+    // Type size is the whole window's zoom, so it has to be applied by the
+    // process that owns the window — the renderer can only ask.
+    if (settings.fontSize !== before.fontSize) applyUiScale(mainWindow, settings.fontSize);
     if (settings.permissionMode !== before.permissionMode) {
       logService.info('app', 'Permission mode changed', {
         from: before.permissionMode,
@@ -255,6 +378,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       settings.updateCheckIntervalHours !== before.updateCheckIntervalHours
     ) {
       updateService.reconfigure();
+    }
+    // The health watch reads its switches when a probe is scheduled, so the
+    // change has to reach it — turning it off must stop the timer in flight.
+    if (
+      settings.providerHealthCheckEnabled !== before.providerHealthCheckEnabled ||
+      settings.providerHealthCheckIntervalMinutes !== before.providerHealthCheckIntervalMinutes
+    ) {
+      providerHealthService.reconfigure();
     }
     return settings;
   });
@@ -273,6 +404,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     providerManager.reloadProviders();
     return appStore.getSanitizedProviders();
   });
+
+  ipcMain.handle(IPC_CHANNELS.PROVIDERS_TEST_ALL, () => providerManager.testAll());
+
+  // The renderer can ask for a health verdict right now (opening the hub, or
+  // the user pressing "check again" on the warning) — the answer is the same
+  // push event the scheduler sends, fallback search included, so the UI has
+  // exactly one shape to render.
+  ipcMain.handle(IPC_CHANNELS.PROVIDER_HEALTH_PROBE, () => providerHealthService.probe('manual'));
 
   ipcMain.handle(
     IPC_CHANNELS.PROVIDERS_TEST,
@@ -393,9 +532,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       // The updater never restarts the app mid-task (spec §83).
       updateService.setAgentBusy(true);
       catalogRefreshService.setAgentBusy(true);
+      // Nor does the health watch spend a request the run needs.
+      providerHealthService.setAgentBusy(true);
       agentRuntime.run(mainWindow, args).finally(() => {
         updateService.setAgentBusy(false);
         catalogRefreshService.setAgentBusy(false);
+        providerHealthService.setAgentBusy(false);
       });
       return true;
     }
@@ -421,6 +563,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   );
   ipcMain.handle(IPC_CHANNELS.AGENT_PLAN_STEP, (_event, decision: PlanStepDecision) =>
     agentRuntime.resolvePlanStep(decision)
+  );
+  ipcMain.handle(IPC_CHANNELS.AGENT_ANSWER_QUESTIONS, (_event, answer: QuestionAnswer) =>
+    agentRuntime.answerQuestions(answer)
   );
   ipcMain.handle(
     IPC_CHANNELS.AGENT_APPROVAL_RESOLVE,
@@ -496,9 +641,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
         .map((file) => {
           const id = path.basename(file, '.md');
           const content = fs.readFileSync(path.join(dir, file), 'utf8');
-          const firstLine =
-            content.split('\n').find((line) => line.trim() && !line.startsWith('#')) || `Skill: ${id}`;
-          return { id, name: id, description: firstLine.trim().slice(0, 120), content, isGlobal };
+          // The same rule the Skills page edits by, so the list and the form
+          // never disagree about which line is the skill's description.
+          const description = splitSkillFile(content).description || `Skill: ${id}`;
+          return { id, name: id, description: description.slice(0, 120), content, isGlobal };
         });
     } catch (e) {
       console.error(`Failed reading skills from ${dir}:`, e);
@@ -525,6 +671,48 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
 
     return skills;
+  });
+
+  // ------------------------------------------------------------------ rules
+  //
+  // The laws the engine enforces live in `shared/rules` and are read by both
+  // processes directly; what crosses this boundary is only the user's own two
+  // files. `reveal` resolves the path itself rather than trusting one from the
+  // renderer, so a stray call cannot open an arbitrary file.
+  ipcMain.handle(IPC_CHANNELS.RULES_GET, (_event, projectPath?: string) => {
+    const globalFile = userRulesPath(appStore.getDataDir());
+    const projectFile = projectPath ? projectRulesPath(projectPath) : '';
+    return {
+      global: readRulesFile(globalFile) ?? '',
+      project: projectFile ? readRulesFile(projectFile) ?? '' : '',
+      globalPath: globalFile,
+      projectFile
+    };
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.RULES_SAVE,
+    (_event, scope: 'global' | 'project', content: string, projectPath?: string) => {
+      const file =
+        scope === 'project' && projectPath
+          ? projectRulesPath(projectPath)
+          : userRulesPath(appStore.getDataDir());
+      return writeRulesFile(file, String(content ?? ''), file === userRulesPath(appStore.getDataDir()) ? 'global' : 'project');
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.RULES_REVEAL, async (_event, scope: 'global' | 'project', projectPath?: string) => {
+    const file =
+      scope === 'project' && projectPath
+        ? projectRulesPath(projectPath)
+        : userRulesPath(appStore.getDataDir());
+    try {
+      if (!fs.existsSync(file)) writeRulesFile(file, '', file === userRulesPath(appStore.getDataDir()) ? 'global' : 'project');
+      const error = await shell.openPath(file);
+      return error ? { success: false, error } : { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   });
 
   ipcMain.handle(IPC_CHANNELS.SKILLS_SAVE, (_event, skill: SkillItem, projectPath?: string) => {
@@ -619,32 +807,56 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.PREVIEW_DETECT, async (_event, projectPath?: string) => {
-    // Addresses the servers themselves printed come first: they are the truth,
-    // while everything below is a guess that can easily be wrong.
-    const candidates = new Set<string>(previewRegistry.urls());
-    for (const port of DEV_SERVER_PORTS) candidates.add(`http://localhost:${port}`);
+    // No project, no preview. Every address on the machine is somebody's, and
+    // without a folder to compare against there is no way to tell whose.
+    if (!projectPath) return [];
 
-    if (projectPath) {
-      const pkgFile = path.join(projectPath, 'package.json');
-      try {
-        if (fs.existsSync(pkgFile)) {
-          const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
-          const scripts: Record<string, string> = pkg.scripts || {};
-          for (const [name, command] of Object.entries(scripts)) {
-            if (!/^(dev|start|serve|preview)/.test(name)) continue;
-            const portMatch = command.match(/(?:--port|-p)\s+(\d{2,5})/) || command.match(/:(\d{4,5})/);
-            if (portMatch) {
-              candidates.add(`http://localhost:${portMatch[1]}`);
-              candidates.add(`http://127.0.0.1:${portMatch[1]}`);
-            }
+    // Addresses this project's own servers printed come first: they are the
+    // truth, while everything below is a guess that can easily be wrong. There is
+    // deliberately no list of "common" ports (5173, 3000, 4200…) in here any
+    // more: those numbers describe a machine, not a project, and on a machine
+    // with two projects open they describe the *other* one. Every candidate now
+    // has to be attributable to this folder.
+    const candidates = new Set<string>(previewRegistry.urls(projectPath));
+
+    /** Ports the project's own scripts ask for, e.g. `vite --port 4000`. */
+    const declaredPorts: number[] = [];
+
+    const pkgFile = path.join(projectPath, 'package.json');
+    try {
+      if (fs.existsSync(pkgFile)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+        const scripts: Record<string, string> = pkg.scripts || {};
+        for (const [name, command] of Object.entries(scripts)) {
+          if (!/^(dev|start|serve|preview)/.test(name)) continue;
+          const portMatch = command.match(/(?:--port|-p)\s+(\d{2,5})/) || command.match(/:(\d{4,5})/);
+          if (portMatch) {
+            declaredPorts.push(Number(portMatch[1]));
+            candidates.add(`http://localhost:${portMatch[1]}`);
+            candidates.add(`http://127.0.0.1:${portMatch[1]}`);
           }
         }
-      } catch {
-        // No readable package.json — fall back to probing.
       }
+    } catch {
+      // No readable package.json — fall back to probing.
     }
 
-    const remembered = previewRegistry.list();
+    // Whatever this machine is serving from a development runtime *in this
+    // project*. This is how a server the user started in their own terminal — on
+    // a port nothing here could have guessed — still shows up in the panel, and
+    // it is also why a leftover server from another folder no longer does: its
+    // process was not started here.
+    const listeners = await listenPortsSnapshot();
+    const table =
+      listeners.length > 0 ? await describeProcesses(listeners.map((entry) => entry.pid)) : new Map();
+    const mine = portsForProject(listeners, table, projectPath);
+    // With more than one listener of this project's own, the first port belongs
+    // to the server the user most likely means; the rest stay as candidates.
+    const listening =
+      mine.length > 1 ? rankListeningPorts(mine, table, projectPath) : mine.map((entry) => entry.port);
+    for (const port of listening) candidates.add(`http://localhost:${port}`);
+
+    const remembered = previewRegistry.list(projectPath);
     const live = new Map<string, boolean>();
     await Promise.all(
       Array.from(candidates).map(async (url) => live.set(url, await probePort(Number(new URL(url).port))))
@@ -654,15 +866,124 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     // that is only a guess and does not answer is not listed at all — a row of
     // dead ports is what made the panel look broken rather than empty.
     const liveRemembered = remembered.filter((server) => live.get(server.url)).map((server) => server.url);
+    const rankOf = (url: string) => {
+      const port = Number(new URL(url).port);
+      // A port the project declares, or one a running dev process owns, is a far
+      // better guess than a well-known default that happens to be occupied by
+      // something else.
+      if (declaredPorts.includes(port)) return 0;
+      // The order the ranker produced, so the project's own dev server wins over
+      // a leftover server from another project (or another session).
+      const ranked = listening.indexOf(port);
+      if (ranked >= 0) return 1 + ranked;
+      return 100;
+    };
     const liveGuessed = Array.from(candidates)
       .filter((url) => live.get(url) && !liveRemembered.includes(url))
-      .sort((a, b) => a.localeCompare(b));
+      .sort((a, b) => rankOf(a) - rankOf(b) || a.localeCompare(b));
     // Still booting counts: the panel should open while the server starts.
     const booting = remembered
       .filter((server) => !live.get(server.url) && Date.now() - server.seenAt < 120_000)
       .map((server) => server.url);
 
     return Array.from(new Set([...liveRemembered, ...liveGuessed, ...booting]));
+  });
+
+  /**
+   * What this app would run instead of a command the user typed themselves.
+   *
+   * The terminal is the one place where a dev server is started by hand, and it
+   * is the same decision the Launch button makes: the project's own port, passed
+   * to the tool that can take it. The panel asks here rather than deciding in the
+   * renderer so that both paths cannot drift apart.
+   */
+  ipcMain.handle(IPC_CHANNELS.PREVIEW_PLAN, async (_event, command: string, projectPath?: string) => {
+    const line = String(command ?? '').trim();
+    if (!projectPath || !line) return null;
+    const script = scriptBodyFor(projectPath, line);
+    return planDevServerLaunch({
+      projectPath,
+      command: line,
+      script: script?.script,
+      body: script?.body
+    });
+  });
+
+  /**
+   * Starts the project's own dev server, because the preview panel cannot be the
+   * only thing standing between the user and a running app.
+   *
+   * The command is never invented: it is the script the project declares, run in
+   * a terminal that stays open, so the address the server prints reaches the
+   * registry and the panel follows it.
+   *
+   * What *is* decided here is the port, and only when the project has not decided
+   * it already: a frontend serves from 1000 upward and a backend from 3000
+   * upward, and a port another project holds is never handed out again. That is
+   * what makes two projects open at once two previews instead of one race.
+   */
+  ipcMain.handle(IPC_CHANNELS.PREVIEW_LAUNCH, async (_event, projectPath?: string) => {
+    if (!projectPath) return { started: false, error: 'no-project' };
+    try {
+      const pkgFile = path.join(projectPath, 'package.json');
+      if (!fs.existsSync(pkgFile)) return { started: false, error: 'no-package-json' };
+      const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+      const files = fs.readdirSync(projectPath);
+      const decision = devServerCommand(pkg.scripts, files);
+      if (!decision) return { started: false, error: 'no-dev-script' };
+
+      const body: string | undefined = pkg.scripts?.[decision.script];
+      // Nothing starts until the guard says the road is clear: a server this
+      // project is already serving is pointed at instead of duplicated, and a
+      // port somebody else holds is never raced for.
+      const guard = await guardDevServerLaunch({
+        plannedPort: declaredPort(body ?? decision.command),
+        remembered: previewRegistry.list(projectPath).map((server) => ({ url: server.url, seenAt: server.seenAt })),
+        attributedPorts: await attributedListenerPorts(projectPath),
+        isAlive: (url) => previewRegistry.alive(url)
+      });
+      if (guard.action === 'already-running') {
+        logService.info(
+          'app',
+          'Preview: dev server already running for this project — pointing at it instead of starting a duplicate',
+          { url: guard.url, port: guard.port }
+        );
+        return { started: false, alreadyRunning: true, url: guard.url, port: guard.port };
+      }
+      if (guard.action === 'port-busy') {
+        logService.info('app', 'Preview: refused to start on a port another project holds', { port: guard.port });
+        return { started: false, error: 'port-busy', port: guard.port };
+      }
+
+      const plan = await planDevServerLaunch({
+        projectPath,
+        command: decision.command,
+        script: decision.script,
+        body
+      });
+
+      // `PORT` as well as the flag: a plain `node server.js` reads the variable
+      // and takes no argument at all.
+      if (plan.port) terminalService.startServer(plan.command, projectPath, mainWindow, { PORT: String(plan.port) });
+      else terminalService.startServer(plan.command, projectPath, mainWindow);
+      if (plan.port) previewRegistry.remember(`http://localhost:${plan.port}`, 'launch', projectPath);
+      logService.info('app', 'Preview: started the project’s dev server', {
+        command: plan.command,
+        port: plan.port,
+        kind: plan.kind,
+        packageManager: decision.packageManager
+      });
+      return {
+        started: true,
+        ...decision,
+        command: plan.command,
+        port: plan.port,
+        kind: plan.kind,
+        url: plan.port ? `http://localhost:${plan.port}` : null
+      };
+    } catch (e: any) {
+      return { started: false, error: String(e?.message || e) };
+    }
   });
 
   ipcMain.handle('storage:info', () => appStore.getStorageInfo());
@@ -759,10 +1080,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   });
 
   // --------------------------------------------------------- notifications
-  ipcMain.handle(IPC_CHANNELS.APP_NOTIFY, (_event, request: { title: string; body?: string; kind?: any }) => {
-    if (!appStore.getSettings().desktopNotifications) return false;
-    return notificationService.show(request, () => mainWindow);
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.APP_NOTIFY,
+    (_event, request: { title: string; body?: string; kind?: any; silent?: boolean }) => {
+      if (!appStore.getSettings().desktopNotifications) return false;
+      return notificationService.show(request, () => mainWindow);
+    }
+  );
 
   // ----------------------------------------------------- crash recovery: buffers
   ipcMain.handle(IPC_CHANNELS.BUFFERS_GET, () => appStore.getBuffers());

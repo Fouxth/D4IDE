@@ -15,7 +15,10 @@ import { formatRelativeTime } from '../../lib/format';
  * client ids the flows need, and the switch that turns the gate on or off. The
  * token itself is never shown — only what it identifies.
  */
-export const AccountTab: React.FC = () => {
+export const AccountTab: React.FC<{
+  /** True when the page above already carries this heading (Settings → General). */
+  embedded?: boolean;
+}> = ({ embedded }) => {
   const { t } = useTranslation();
   const { state, signOut, signingIn, signIn } = useAuthStore();
   const { settings, updateSettings } = useSettingsStore();
@@ -27,13 +30,15 @@ export const AccountTab: React.FC = () => {
 
   return (
     <div className="space-y-5 select-text">
-      <div>
-        <h3 className="text-sm font-semibold text-d4-text flex items-center gap-1.5">
-          <UserRound className="w-3.5 h-3.5" />
-          {t('auth.account')}
-        </h3>
-        <p className="text-[11px] text-d4-dimmed mt-0.5">{t('auth.subtitle')}</p>
-      </div>
+      {!embedded && (
+        <div>
+          <h3 className="text-sm font-semibold text-d4-text flex items-center gap-1.5">
+            <UserRound className="w-3.5 h-3.5" />
+            {t('auth.account')}
+          </h3>
+          <p className="text-[11px] text-d4-dimmed mt-0.5">{t('auth.subtitle')}</p>
+        </div>
+      )}
 
       {/* Who is signed in */}
       <div className="bg-d4-surface border border-d4-border rounded p-3 flex items-center gap-3">

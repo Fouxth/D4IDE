@@ -1,4 +1,5 @@
 import { ModelInfo, ProviderConfig } from './types';
+import { isLoopbackBaseUrl } from './local-endpoints';
 
 /**
  * One vendor is one entry, even when it speaks several protocols.
@@ -55,8 +56,71 @@ export function vendorLabel(name: string): string {
  */
 export function isProviderInUse(provider: ProviderConfig, activeProviderIds: string[] = []): boolean {
   if (provider.hasApiKey) return true;
+  // A key that is on file but will not decrypt is still a provider the user set
+  // up; hiding its card would hide the very thing they have to fix.
+  if (provider.keyUnreadable) return true;
   if (provider.status === 'connected') return true;
   return activeProviderIds.includes(provider.id) || activeProviderIds.includes(vendorIdOf(provider.id));
+}
+
+/**
+ * A runtime on this machine that needs no API key — Ollama, LM Studio, or any
+ * other shipped no-key endpoint at a loopback address.
+ *
+ * The user asked for these to stay out of the model picker: the picker is meant
+ * to list the accounts they connected, and Ollama answering on localhost is not
+ * a decision to have it on the menu. A provider the user added themselves is not
+ * in this class however local its URL is — pointing one at localhost is itself
+ * the decision.
+ */
+export function isLocalRuntime(
+  provider: Pick<ProviderConfig, 'requiresApiKey' | 'type' | 'baseUrl' | 'isCustom' | 'isBuiltIn'>
+): boolean {
+  if (provider.isCustom) return false;
+  if (provider.requiresApiKey !== false) return false;
+  if (provider.type === 'ollama') return true;
+  // Every keyless preset D4IDE ships is a local runtime, and that is a fact worth
+  // asserting elsewhere (see the provider-catalog test): LM Studio is seeded as an
+  // OpenAI-compatible server, so the type alone would let it through.
+  if (provider.isBuiltIn) return true;
+  return isLoopbackBaseUrl(provider.baseUrl);
+}
+
+/**
+ * Whether a provider belongs in the model picker.
+ *
+ * The picker is a menu, so it lists what can actually be talked to: a provider
+ * with a key, one we have seen answer, or the one currently selected. Listing
+ * every shipped preset would put forty unusable rows in front of the two the
+ * user has set up — and the picker has its own "connect a provider" entry for
+ * the rest.
+ *
+ * Local runtimes are the one case that needs an explicit opt-in. They carry no
+ * key, so "the runtime reported models" was being read as "the user set this
+ * up", and a user who uses neither Ollama nor LM Studio still found both in the
+ * menu. With `localProvidersEnabled` off they are left out entirely; the picker
+ * offers the switch that brings them back.
+ */
+export function isProviderChoosable(
+  provider: ProviderConfig,
+  activeProviderIds: string[] = [],
+  options: { localProvidersEnabled?: boolean } = {}
+): boolean {
+  if (!provider.enabled) return false;
+  // The local check comes before every other reason to show a provider: a runtime
+  // that answered on this machine reports `connected`, which is precisely the
+  // state the user did not want to see it in.
+  if (isLocalRuntime(provider)) {
+    // Still never hidden while it is the thing being talked to.
+    if (activeProviderIds.includes(provider.id) || activeProviderIds.includes(vendorIdOf(provider.id))) return true;
+    return options.localProvidersEnabled === true && (provider.models.length > 0 || provider.status === 'connected');
+  }
+  if (provider.hasApiKey) return provider.models.length > 0;
+  if (provider.status === 'connected') return true;
+  if (activeProviderIds.includes(provider.id) || activeProviderIds.includes(vendorIdOf(provider.id))) return true;
+  if (provider.requiresApiKey !== false) return false;
+  // Anything else keyless (a user's own endpoint) still needs a model to offer.
+  return provider.models.length > 0;
 }
 
 /** A model and the config that owns it — needed to write an edit back. */
@@ -76,6 +140,8 @@ export interface VendorGroup {
   /** The best status any of the vendor's connections reported. */
   status: ProviderConfig['status'];
   hasApiKey: boolean;
+  /** True when a saved key is on file but can no longer be decrypted. */
+  keyUnreadable: boolean;
   requiresApiKey: boolean;
   docsUrl?: string;
   latencyMs?: number;
@@ -110,6 +176,7 @@ export function groupProviders(
         inUse: false,
         status: provider.status,
         hasApiKey: false,
+        keyUnreadable: false,
         requiresApiKey: false,
         protocols: []
       };
@@ -127,6 +194,7 @@ export function groupProviders(
     group.docsUrl = group.providers.find((p) => p.docsUrl)?.docsUrl;
     group.requiresApiKey = group.providers.some((p) => p.requiresApiKey !== false);
     group.hasApiKey = group.providers.some((p) => p.hasApiKey);
+    group.keyUnreadable = group.providers.some((p) => p.keyUnreadable);
     group.inUse = group.providers.some((provider) => isProviderInUse(provider, activeProviderIds));
     group.protocols = Array.from(new Set(group.providers.map((p) => p.type)));
 
@@ -134,6 +202,11 @@ export function groupProviders(
       const rank = STATUS_RANK[p.status || 'unknown'] ?? STATUS_RANK.unknown;
       return rank < (STATUS_RANK[best || 'unknown'] ?? STATUS_RANK.unknown) ? p.status : best;
     }, group.providers[0].status);
+
+    // One connection still being reachable does not fix an unreadable key, and it
+    // must not make the card read "connected" while its key field can no longer
+    // be filled in from storage.
+    if (group.keyUnreadable && group.status !== 'connected') group.status = 'error';
 
     // One model per id: two protocols never serve the same model, but a user may
     // have added it by hand to both, and a duplicate row would be a lie.

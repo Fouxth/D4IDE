@@ -58,6 +58,21 @@ describe('design profiles', () => {
     }
   });
 
+  it('carries the anti-AI-slop bans in every profile, in both languages', () => {
+    for (const style of ['minimal', 'modern-saas', 'dark-premium', 'bold'] as const) {
+      const en = buildDesignBrief(style, 'en');
+      const th = buildDesignBrief(style, 'th');
+      // The tells users actually notice must be banned in the language the
+      // model is addressed in — a ban the model never reads is not a ban.
+      expect(en).toContain('Ban 1:');
+      expect(en).toContain('purple-blue gradients');
+      expect(en).toContain('emoji as icons');
+      expect(th).toContain('ห้าม 1:');
+      expect(th).toContain('เกรเดียนต์ม่วง-น้ำเงิน');
+      expect(th).toContain('อีโมจิแทนไอคอน');
+    }
+  });
+
   it('only accepts known style ids from stored data', () => {
     expect(isDesignStyle('minimal')).toBe(true);
     expect(isDesignStyle('ask')).toBe(true);

@@ -82,6 +82,20 @@ describe('transcript grouping', () => {
     expect(nodes.map((n) => n.kind)).toEqual(['run', 'plan', 'summary']);
   });
 
+  it('a question card is its own node, not a step inside the run', () => {
+    // The card carries buttons, so it must not be swallowed by a collapsed run
+    // of tool calls — the user could not answer work that is folded away.
+    const nodes = buildNodes([
+      call('a', 'read_file'),
+      result('a', 'a'),
+      { id: 'q', type: 'question', title: 'Questions', timestamp: 0 },
+      call('b', 'read_file'),
+      result('b', 'b')
+    ]);
+
+    expect(nodes.map((n) => n.kind)).toEqual(['run', 'question', 'run']);
+  });
+
   it('folds a finished long run, and keeps the newest one open', () => {
     const timeline: AgentTimelineItem[] = [];
     for (let i = 0; i < 6; i++) {

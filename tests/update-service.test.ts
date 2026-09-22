@@ -221,6 +221,60 @@ describe('the manual flow', () => {
     expect(status.error).toContain('No downloaded update');
   });
 
+  it('reports "no release yet" as up to date, not as a failure', () => {
+    // A repository between releases answers every check with 404 or a missing
+    // latest.yml. Calling that an error put a red line on the Updates screen at
+    // every launch — which teaches the user to ignore update errors.
+    const updater = makeUpdater();
+    const service = startWith(updater);
+
+    updater.emit('error', Object.assign(new Error('No published versions on GitHub'), { code: 'ERR_UPDATER_NO_PUBLISHED_VERSIONS' }));
+    expect(service.getStatus().state).toBe('idle');
+    expect(service.getStatus().checkedAt).toBeGreaterThan(0);
+
+    updater.emit('error', new Error('HttpError: 404 Not Found for https://example.test/latest.yml'));
+    expect(service.getStatus().state).toBe('idle');
+  });
+
+  it('still reports a real failure as a failure', () => {
+    const updater = makeUpdater();
+    const service = startWith(updater);
+
+    updater.emit('error', new Error('getaddrinfo ENOTFOUND api.github.com'));
+    expect(service.getStatus().state).toBe('error');
+    expect(service.getStatus().error).toContain('ENOTFOUND');
+  });
+
+  it('treats a rejected check against an unpublished feed as up to date, not broken', async () => {
+    // electron-updater does not only emit an error event for a repository with
+    // no release — `checkForUpdates()` also rejects with the same message. Seen
+    // in the wild on a fresh 1.1.0 build against a feed that has not been
+    // published yet: the event was classified, the rejection was not, and the
+    // Updates screen showed red for a perfectly healthy "nothing to install".
+    const updater = makeUpdater();
+    updater.checkForUpdates = vi.fn(async () => {
+      throw Object.assign(new Error('No published versions on GitHub'), {
+        code: 'ERR_UPDATER_NO_PUBLISHED_VERSIONS'
+      });
+    });
+    const service = startWith(updater);
+
+    const status = await service.check('manual');
+    expect(status.state).toBe('idle');
+    expect(status.checkedAt).toBeGreaterThan(0);
+  });
+
+  it('treats a 404 latest.yml rejection the same way', async () => {
+    const updater = makeUpdater();
+    updater.checkForUpdates = vi.fn(async () => {
+      throw new Error('HttpError: 404 Not Found for https://example.test/latest.yml');
+    });
+    const service = startWith(updater);
+
+    const status = await service.check('manual');
+    expect(status.state).toBe('idle');
+  });
+
   it('skipping a version records it and starts looking again', async () => {
     const { updater, service } = await withAvailableUpdate();
 

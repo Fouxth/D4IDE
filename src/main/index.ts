@@ -7,9 +7,11 @@ import { browserService } from './browser/browser-service';
 import { logService } from './logging/log-service';
 import { updateService } from './updater/update-service';
 import { catalogRefreshService } from './ai/providers/catalog-refresh';
+import { providerHealthService } from './ai/providers/health-check-service';
 import { appStore } from './database/store';
 import { providerManager } from './ai/providers/provider-manager';
 import { applyPerformanceProfile } from './performance-profile';
+import { applyUiScale } from './ui-scale';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -30,6 +32,17 @@ let mainWindow: BrowserWindow | null = null;
 const performanceProfile = applyPerformanceProfile((message, context) =>
   console.log(`[D4IDE] ${message}`, context ?? '')
 );
+
+/**
+ * Who this app is, as far as Windows is concerned.
+ *
+ * Toasts take their name and icon from the app user model id, which has to match
+ * the one the installer writes on the shortcut. Without this the popup is
+ * labelled "electron.app.Electron" and shows Electron's own icon — while the
+ * app running behind it is D4IDE. Both calls are safe before `whenReady`.
+ */
+app.setName('D4IDE');
+app.setAppUserModelId('com.d4ide.app');
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -55,7 +68,26 @@ function createWindow() {
     }
   });
 
-  mainWindow.on('ready-to-show', () => mainWindow?.show());
+  mainWindow.on('ready-to-show', () => {
+    // The type size is a per-session window property, so it is re-applied on
+    // every start rather than remembered by Chromium.
+    try {
+      applyUiScale(mainWindow, appStore.getSettings().fontSize);
+    } catch {
+      // Settings unreadable: the default size is a fine answer.
+    }
+    mainWindow?.show();
+  });
+
+  // Applied again once the page is in: Chromium keeps zoom per origin, and a
+  // reload after a crash has to come back at the same size.
+  mainWindow.webContents.on('did-finish-load', () => {
+    try {
+      applyUiScale(mainWindow, appStore.getSettings().fontSize);
+    } catch {
+      // Nothing to do — the window is already at a readable default.
+    }
+  });
 
   // Deny unexpected permission requests (camera, mic, geolocation…) — the IDE
   // never needs them (spec §65).
@@ -156,6 +188,7 @@ app.whenReady().then(() => {
 
   createWindow();
   updateService.setWindowProvider(() => mainWindow);
+  providerHealthService.setWindowProvider(() => mainWindow);
   // Detection only, and deliberately late: D4IDE looks for a newer build on its
   // own so it can say so, but downloading, installing and restarting are always
   // the user's click (see src/main/updater/update-service.ts).
@@ -164,6 +197,9 @@ app.whenReady().then(() => {
   // the difference, and wait (see src/main/ai/providers/catalog-refresh.ts).
   catalogRefreshService.setWindowProvider(() => mainWindow);
   catalogRefreshService.start();
+  // The watch on the provider being talked to: deliberately on the same late
+  // schedule as the other services so it cannot compete with the first paint.
+  providerHealthService.start();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -175,6 +211,7 @@ app.on('before-quit', async () => {
   logService.info('app', 'Shutting down');
   updateService.stop();
   catalogRefreshService.stop();
+  providerHealthService.stop();
   terminalService.killAll();
   await mcpClient.stopAll().catch(() => undefined);
   await browserService.close().catch(() => undefined);

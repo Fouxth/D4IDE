@@ -137,3 +137,21 @@ export function memoryUpkeepRules(language: 'th' | 'en'): string {
     ? 'ปิดท้ายทุกงาน: อัปเดต .d4ide/project.md ให้ตรงกับของจริง (โปรเจกต์คืออะไร เทคโนโลยี โครงสร้าง ข้อตกลง และสถานะล่าสุด) โดยเขียนทับหัวข้อเดิม ไม่ต้องต่อท้ายยาว ๆ ถ้าไฟล์ยังไม่มีให้สร้างจากข้อเท็จจริงที่เห็นในโค้ด ห้ามเดา'
     : 'At the end of every task: update .d4ide/project.md so it matches reality (what the project is, its stack, layout, conventions and current state). Rewrite the headings rather than appending endlessly; if the file does not exist, create it from facts you actually saw in the code — never guess.';
 }
+
+/**
+ * The memory rule for a message that asks for nothing.
+ *
+ * The upkeep rule ends "every task" — and saying hello is not a task. Read
+ * literally it turned a greeting into a survey: the memory file did not exist,
+ * so the only way to obey was to go and read the codebase and write one. The
+ * user asked for a hello back and got a project report.
+ *
+ * Nothing was changed, so there is nothing to record; the rule says that out
+ * loud rather than leaving it to inference, because "do not update the memory"
+ * is exactly the kind of absence a model fills in with exploration.
+ */
+export function memoryIdleRule(language: 'th' | 'en'): string {
+  return language === 'th'
+    ? 'ข้อความนี้ไม่ได้สั่งงานและไม่ได้แก้ไฟล์ใด ๆ: ไม่ต้องสร้างหรืออัปเดต .d4ide/project.md และไม่ต้องสำรวจโปรเจกต์เพื่อเตรียมข้อมูลสำหรับไฟล์นั้น'
+    : 'This message asks for no work and changes no file: do not create or update .d4ide/project.md, and do not explore the project to gather material for it.';
+}

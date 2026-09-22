@@ -1,5 +1,5 @@
 import React from 'react';
-import { GitBranch, AlertTriangle, Terminal, PanelLeft, Bot, Code2, Loader2, Zap, Leaf, Sparkles, Download, RotateCcw } from 'lucide-react';
+import { GitBranch, Terminal, PanelLeft, Bot, Code2, Loader2, Zap, Leaf, Sparkles, Download, RotateCcw } from 'lucide-react';
 import { formatTokens } from '../lib/format';
 import { useTranslation } from 'react-i18next';
 import { useAgentStore } from '../stores/agentStore';
@@ -8,6 +8,7 @@ import { useUsageStore } from '../stores/usageStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useUpdateStore } from '../stores/updateStore';
 import { GitStatusSummary, WorkspaceMode } from '../../shared/types';
+import { shouldShowGit } from '../../shared/git';
 
 interface StatusBarProps {
   gitStatus: GitStatusSummary | null;
@@ -46,6 +47,9 @@ export const StatusBar: React.FC<StatusBarProps> = ({
 
   const changed = gitStatus ? gitStatus.staged.length + gitStatus.unstaged.length + gitStatus.untracked.length : 0;
   const busy = status === 'running' || status === 'planning' || status === 'waiting_approval';
+  // No repository or no remote: nothing here belongs on screen. A permanent "—"
+  // on every non-git folder was noise pretending to be information.
+  const showGit = shouldShowGit(gitStatus);
 
   const cell = 'flex items-center gap-1 px-2 h-6 rounded-sm hover:bg-d4-surface transition-colors';
 
@@ -60,11 +64,13 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           </span>
         </button>
 
-        <button onClick={onOpenGit} className={cell} title={t('status.git')}>
-          <GitBranch className="w-3 h-3" />
-          <span>{gitStatus?.branch || '—'}</span>
-          {changed > 0 && <span className="text-d4-warning">+{changed}</span>}
-        </button>
+        {showGit && (
+          <button onClick={onOpenGit} className={cell} title={gitStatus?.remote || t('status.git')}>
+            <GitBranch className="w-3 h-3" />
+            <span>{gitStatus?.branch || '—'}</span>
+            {changed > 0 && <span className="text-d4-warning">+{changed}</span>}
+          </button>
+        )}
 
         <span className={`${cell} cursor-default`}>
           {busy ? (
@@ -74,13 +80,6 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           )}
           <span>{t(`agent.status_${status}` as any, { defaultValue: status })}</span>
         </span>
-
-        {summary?.budget.warn && (
-          <button onClick={() => onOpenSettings('usage')} className={`${cell} text-d4-warning`}>
-            <AlertTriangle className="w-3 h-3" />
-            <span>{t('usage.budgets')}</span>
-          </button>
-        )}
 
         {/* The token meter: what this run has spent, what it avoided spending,
             and the ceiling it is running against. */}
@@ -104,13 +103,9 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         )}
 
         {(tokenStats?.thrift || settings?.thriftMode) && (
-          <button
-            onClick={() => onOpenSettings('usage')}
-            className={`${cell} text-emerald-400`}
-            title={tokenStats?.autoThrift ? t('tokenMeter.autoThriftHint') : undefined}
-          >
+          <button onClick={() => onOpenSettings('usage')} className={`${cell} text-emerald-400`}>
             <Leaf className="w-3 h-3" />
-            <span>{tokenStats?.autoThrift ? t('tokenMeter.autoThriftOn') : t('tokenMeter.thriftOn')}</span>
+            <span>{t('tokenMeter.thriftOn')}</span>
           </button>
         )}
 
@@ -193,7 +188,12 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           </button>
         )}
 
-        <button onClick={() => onOpenSettings('language')} className={cell}>
+        <button
+          onClick={() => onOpenSettings('language')}
+          title={t('settings.language')}
+          aria-label={t('settings.language')}
+          className={cell}
+        >
           <span>{settings?.language === 'th' ? 'ไทย' : 'EN'}</span>
         </button>
       </div>

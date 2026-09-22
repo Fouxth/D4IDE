@@ -7,6 +7,8 @@ import { useTranslation } from 'react-i18next';
 import { useProject } from '../../stores/projectStore';
 import { terminalBus } from '../../lib/terminal-bus';
 import { scrollbackFor } from '../../lib/device-profile';
+import { submittedInput, TypedLine } from '../../lib/terminal-command';
+import { startsDevServer } from '../../lib/preview-url';
 
 interface TerminalTab {
   id: string;
@@ -78,7 +80,61 @@ export const TerminalPanel: React.FC<{ onClose?: () => void; variant?: 'bottom' 
 
       window.electronAPI.terminalCreate(tab.id, projectPath || '.', tab.shell);
 
-      const onData = term.onData((data) => window.electronAPI.terminalWrite(tab.id, data));
+      /*
+       * Typing goes to the shell untouched, and only the Enter key is held for a
+       * moment. Enter is the last chance to tell a dev server which port to use:
+       * by the time the shell sees it, the command has already run and the port
+       * is whatever the tool defaulted to — which is the number every other
+       * project on the machine is also using.
+       *
+       * So the key is held, the planned command is asked for, and the extra
+       * arguments are typed on the user's behalf — visibly, as part of the line
+       * they typed, so the terminal never shows one command and runs another.
+       * Every other key, the whole rest of the session, goes straight through.
+       */
+      const tracker = new TypedLine();
+      const held: string[] = [];
+      let planning = false;
+      // `?.` on the method as well as the bridge: the renderer-only preview has
+      // no terminal at all, and typing in it must not throw.
+      const send = (chunk: string) => window.electronAPI?.terminalWrite?.(tab.id, chunk);
+
+      const submit = (line: string, pending: string) => {
+        // The overwhelming majority of lines are not dev servers, and asking
+        // main about them would put a round trip in front of every `ls`.
+        if (!startsDevServer(line)) {
+          send(submittedInput(pending, line, null));
+          return;
+        }
+        planning = true;
+        void (async () => {
+          let plan: { command?: string | null } | null = null;
+          try {
+            plan = await window.electronAPI?.planTerminalCommand?.(line, projectPath || undefined);
+          } catch {
+            // A bridge that cannot answer must not swallow the keystroke: the
+            // line runs exactly as typed.
+          }
+          send(submittedInput(pending, line, plan));
+          planning = false;
+          for (const chunk of held.splice(0)) send(chunk);
+        })();
+      };
+
+      const onData = term.onData((data) => {
+        // Anything typed while the plan is in flight waits its turn, so the port
+        // argument lands at the end of the command it belongs to.
+        if (planning) {
+          held.push(data);
+          return;
+        }
+        const completed = tracker.feed(data);
+        if (completed === null) {
+          send(data);
+          return;
+        }
+        submit(completed.line, completed.pending);
+      });
       const onResize = term.onResize(({ cols, rows }) => window.electronAPI.terminalResize(tab.id, cols, rows));
       // One shared IPC subscription for every tab, and main is told this
       // terminal is on screen so it can skip the ones that are not.

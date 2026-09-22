@@ -44,6 +44,26 @@ import { machineProfile, sqliteCacheKb } from '../performance/machine';
  *   · `checkpoint()` folds the WAL back into the main file (on quit) and
  *     `vacuum()` / `integrityCheck()` are exposed to the Settings UI.
  */
+/**
+ * The values bound into `tool_audit`, in one place so the shape can be asserted
+ * without a database (the native module only loads under Electron's ABI).
+ */
+export function auditRow(entry: ToolAuditEntry): Record<string, string | number> {
+  return {
+    entry_id: entry.id,
+    session_id: entry.sessionId ?? '',
+    tool_name: entry.toolName,
+    args_preview: entry.argsPreview ?? '',
+    mode: entry.mode,
+    allowed: entry.allowed ? 1 : 0,
+    requires_approval: entry.requiresApproval ? 1 : 0,
+    decision: entry.decision ?? '',
+    reason: entry.reason ?? '',
+    duration_ms: entry.durationMs ?? 0,
+    created_at: entry.timestamp
+  };
+}
+
 export class SqliteRepo {
   private db: any;
   readonly file: string;
@@ -357,9 +377,11 @@ export class SqliteRepo {
       .prepare(
         `INSERT OR REPLACE INTO usage_records
          (id, session_id, provider_id, provider_name, model_id, model_name, project_path, mode, status,
-          input_tokens, output_tokens, cached_input_tokens, estimated_cost, duration_ms, created_at)
+          input_tokens, output_tokens, cached_input_tokens, estimated_cost, duration_ms, created_at,
+          summary, summary_request)
          VALUES (@id, @session_id, @provider_id, @provider_name, @model_id, @model_name, @project_path, @mode, @status,
-          @input_tokens, @output_tokens, @cached_input_tokens, @estimated_cost, @duration_ms, @created_at)`
+          @input_tokens, @output_tokens, @cached_input_tokens, @estimated_cost, @duration_ms, @created_at,
+          @summary, @summary_request)`
       )
       .run({
         id: record.id,
@@ -376,7 +398,9 @@ export class SqliteRepo {
         cached_input_tokens: record.cachedInputTokens ?? 0,
         estimated_cost: record.estimatedCost ?? 0,
         duration_ms: record.durationMs ?? 0,
-        created_at: record.timestamp ?? Date.now()
+        created_at: record.timestamp ?? Date.now(),
+        summary: record.summary ?? null,
+        summary_request: record.summaryRequest ?? null
       });
   }
 
@@ -385,6 +409,25 @@ export class SqliteRepo {
       for (const item of items) this.insertUsage(item);
     });
     insert(records);
+  }
+
+  /**
+   * Attaches a completion report to the newest usage row of a session.
+   *
+   * Newest, because the summary is written when the run ends and the run's last
+   * provider call is the row that was created moments before. Returns false when
+   * the session has no usage yet — nothing was spent, so there is nowhere to put
+   * the report, and the caller should not pretend otherwise.
+   */
+  attachUsageSummary(sessionId: string, summary: string, request: string): boolean {
+    const row = this.db
+      .prepare(`SELECT id FROM usage_records WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .get(sessionId) as { id: string } | undefined;
+    if (!row) return false;
+    this.db
+      .prepare(`UPDATE usage_records SET summary = ?, summary_request = ? WHERE id = ?`)
+      .run(summary, request, row.id);
+    return true;
   }
 
   queryUsage(limit = 20000): UsageRecord[] {
@@ -406,6 +449,8 @@ export class SqliteRepo {
       cachedInputTokens: r.cached_input_tokens || undefined,
       estimatedCost: r.estimated_cost,
       durationMs: r.duration_ms || undefined,
+      summary: r.summary || undefined,
+      summaryRequest: r.summary_request || undefined,
       timestamp: r.created_at
     }));
   }
@@ -434,26 +479,29 @@ export class SqliteRepo {
 
   // ---------------------------------------------------------------- audit
 
+  /**
+   * Records one tool call.
+   *
+   * Two things matter here beyond the columns. The caller's id is **text**
+   * (`a_1789…`), so it goes into `entry_id` and never into `id`, which is a
+   * rowid alias: SQLite answers a non-integer there with SQLITE_MISMATCH, and
+   * that threw inside the run loop — a refused tool call ended the run instead of
+   * being reported. And the write is best-effort: a bookkeeping failure must
+   * never abort the work it is recording, so it is logged and swallowed.
+   */
   insertAudit(entry: ToolAuditEntry): void {
-    this.db
-      .prepare(
-        `INSERT OR REPLACE INTO tool_audit
-         (id, session_id, tool_name, args_preview, mode, allowed, requires_approval, decision, reason, duration_ms, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        entry.id,
-        entry.sessionId ?? '',
-        entry.toolName,
-        entry.argsPreview ?? '',
-        entry.mode,
-        entry.allowed ? 1 : 0,
-        entry.requiresApproval ? 1 : 0,
-        entry.decision ?? '',
-        entry.reason ?? '',
-        entry.durationMs ?? 0,
-        entry.timestamp
-      );
+    try {
+      const row = auditRow(entry);
+      this.db
+        .prepare(
+          `INSERT INTO tool_audit
+           (entry_id, session_id, tool_name, args_preview, mode, allowed, requires_approval, decision, reason, duration_ms, created_at)
+           VALUES (@entry_id, @session_id, @tool_name, @args_preview, @mode, @allowed, @requires_approval, @decision, @reason, @duration_ms, @created_at)`
+        )
+        .run(row);
+    } catch (error) {
+      console.error('[db] failed to record a tool call in the audit trail:', error);
+    }
   }
 
   queryAudit(limit = 200): ToolAuditEntry[] {
@@ -461,7 +509,8 @@ export class SqliteRepo {
       .prepare('SELECT * FROM tool_audit ORDER BY created_at DESC LIMIT ?')
       .all(limit) as any[];
     return rows.map((r) => ({
-      id: r.id,
+      // Rows written before v3 have no `entry_id`; the rowid names them instead.
+      id: r.entry_id || `a_${r.id}`,
       sessionId: r.session_id,
       toolName: r.tool_name,
       argsPreview: r.args_preview,
@@ -578,7 +627,11 @@ export class SqliteRepo {
       .prepare(
         'INSERT INTO file_changes (session_id, path, change_type, additions, deletions, created_at) VALUES (?, ?, ?, ?, ?, ?)'
       )
-      .run(sessionId, change.relativePath, change.type, change.additions, change.deletions, Date.now());
+      // `?? 0` for the same reason the audit row is defensive: a caller that
+      // omits the counts must not make the write throw. Binding `undefined` is
+      // refused outright by the driver, and this runs inside the file-change
+      // handler of a live run.
+      .run(sessionId, change.relativePath, change.type, change.additions ?? 0, change.deletions ?? 0, Date.now());
   }
 
   // ------------------------------------------------------------ projects

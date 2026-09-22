@@ -1,21 +1,43 @@
-import { BrowserWindow, Notification } from 'electron';
+import { BrowserWindow, Notification, app } from 'electron';
 import { logService } from '../logging/log-service';
 
 /**
  * Desktop notifications (spec §53).
  *
- * Only five things are worth interrupting the user for: a finished build, a
- * finished test run, an approval request, a rate limit, and a budget threshold.
- * Everything else stays in the in-app toast stream. The renderer decides *when*
- * (it knows whether the window has focus); this side only decides whether the
- * platform can show it at all.
+ * Only the things worth interrupting the user for reach the operating system: a
+ * finished task, a question the agent is waiting on, a failure, and a session
+ * that stopped. Everything else stays in the in-app toast stream. The renderer
+ * decides *when* (it knows whether the window has focus); this side decides
+ * whether the platform can show it at all, and what it looks and sounds like.
+ *
+ * Two details are what make a notification feel like it comes from D4IDE rather
+ * than from Electron:
+ *
+ *   · The app user model id. Windows groups toasts by it and takes the name and
+ *     icon from the shortcut registered under the same id — the one the
+ *     installer writes. Without it the popup is labelled "electron.app.Electron".
+ *   · The sound. Windows toasts can play the system sound or nothing at all;
+ *     a custom tone is played by the app itself (see the renderer's
+ *     `notify-sound`), so `silent` is set whenever D4IDE is making the noise.
  */
+
+export type NotificationKind =
+  | 'build'
+  | 'tests'
+  | 'approval'
+  | 'rateLimit'
+  | 'task'
+  | 'question'
+  | 'error'
+  | 'session';
 
 export interface NotificationRequest {
   title: string;
   body?: string;
-  /** Used for logging and for future per-kind preferences. */
-  kind?: 'build' | 'tests' | 'approval' | 'rateLimit' | 'budget' | 'task';
+  /** Used for logging, urgency, and the sound decision. */
+  kind?: NotificationKind;
+  /** The app plays its own tone for this one, so Windows must stay quiet. */
+  silent?: boolean;
 }
 
 class NotificationService {
@@ -43,11 +65,17 @@ class NotificationService {
     this.lastAt = now;
 
     try {
+      // Text-only on purpose: the user asked for a toast with nothing in it
+      // but the name and the words. (The small icon beside "D4IDE" in the
+      // toast header is Windows' own, drawn from the AppUserModelID shortcut
+      // — no app can suppress that part; the body below is fully ours.)
       const notification = new Notification({
         title,
         body: String(request.body || '').slice(0, 400),
-        silent: request.kind === 'rateLimit',
-        urgency: request.kind === 'approval' ? 'critical' : 'normal'
+        // Rate limits are informational, and a custom tone is played by the
+        // renderer — in both cases Windows must not add a sound of its own.
+        silent: request.silent === true || request.kind === 'rateLimit',
+        urgency: request.kind === 'approval' || request.kind === 'error' ? 'critical' : 'normal'
       });
 
       // Clicking the notification brings the app forward — the whole point of

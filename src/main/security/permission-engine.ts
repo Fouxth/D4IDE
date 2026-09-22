@@ -1,5 +1,8 @@
+import path from 'path';
 import { PermissionMode, ToolCall } from '../../shared/types';
 import { getSubagent, subagentRoleNames } from '../ai/agent/subagents';
+import { lawEnabled, outsideProjectRefusal, projectDeletionRefusal } from '../../shared/rules';
+import { checkProjectScope, deletesProjectRoot, isRecursiveDelete, writesOutsideProject } from './scope-guard';
 
 /** Patterns that are blocked outright, regardless of permission mode (spec §14). */
 const DESTRUCTIVE_COMMANDS = [
@@ -43,7 +46,10 @@ const READ_ONLY_TOOLS = new Set([
   'browser_screenshot',
   'browser_console',
   'browser_click',
-  'browser_fill'
+  'browser_fill',
+  // Asking the user a question changes nothing: it is answered by the runtime
+  // and must never be gated behind a dialog about permissions.
+  'ask_question'
 ]);
 
 /**
@@ -87,6 +93,37 @@ export interface PermissionRules {
   alwaysBlock?: string[];
 }
 
+/**
+ * What the guardrails need to know about *this* run.
+ *
+ * The project folder is the boundary every file tool is measured against, and
+ * the request flag is what makes "never delete the project unless instructed"
+ * mean what it says: the runtime reads the user's own words, not the model's
+ * summary of them.
+ */
+export interface PermissionContext {
+  projectPath?: string | null;
+  /** The user's request for this run asked for the project to be destroyed. */
+  explicitDestructiveRequest?: boolean;
+  language?: 'th' | 'en';
+  /**
+   * Standing laws the user switched off. Absent means all of them are in force,
+   * which is what every caller that does not pass settings gets.
+   */
+  disabledLaws?: string[] | null;
+}
+
+/** Tools whose path argument names a file or folder in the project. */
+const PATH_ARGUMENTS: Record<string, string[]> = {
+  read_file: ['path'],
+  write_file: ['path'],
+  edit_file: ['path'],
+  create_file: ['path'],
+  delete_file: ['path'],
+  move_file: ['from', 'to'],
+  list_directory: ['path']
+};
+
 export class PermissionEngine {
   isDangerousCommand(cmd: string): boolean {
     return DESTRUCTIVE_COMMANDS.some((regex) => regex.test(cmd));
@@ -96,8 +133,15 @@ export class PermissionEngine {
     return SENSITIVE_COMMAND_PATTERNS.some((regex) => regex.test(cmd));
   }
 
-  check(mode: PermissionMode, toolCall: ToolCall, rules: PermissionRules = {}): PermissionDecision {
+  check(
+    mode: PermissionMode,
+    toolCall: ToolCall,
+    rules: PermissionRules = {},
+    context: PermissionContext = {}
+  ): PermissionDecision {
     const { name, args = {} } = toolCall;
+    const language = context.language === 'en' ? 'en' : 'th';
+    const projectPath = context.projectPath ?? null;
 
     // 1. Hard guardrails win over every mode and every user rule.
     if (name === 'run_terminal' && typeof args.command === 'string') {
@@ -109,15 +153,87 @@ export class PermissionEngine {
         };
       }
     }
-    if (name === 'run_terminal' && typeof args.command === 'string' && /\brm\s+-rf\b/i.test(args.command)) {
-      return {
-        allowed: false,
-        requiresApproval: true,
-        reason: `Recursive delete blocked by security guardrails: "${args.command}"`
-      };
+
+    // 2. The project-deletion law: the folder the user handed over is not
+    // something a run may throw away on its own initiative. `rm -rf .`,
+    // `rm -rf *`, `git clean -xfd` at the root and a `delete_file` on the root
+    // or on a folder that contains it are the shapes this takes.
+    const deletionTarget =
+      name === 'run_terminal' && typeof args.command === 'string'
+        ? deletesProjectRoot(args.command, projectPath)
+          ? args.command
+          : null
+        : null;
+    const fileDeletion =
+      name === 'delete_file' && typeof args.path === 'string'
+        ? checkProjectScope(projectPath, args.path)
+        : null;
+    const deletesRoot =
+      !!deletionTarget ||
+      (!!fileDeletion &&
+        !!projectPath &&
+        (fileDeletion.resolved === path.resolve(projectPath) || fileDeletion.isRootOrAbove));
+
+    if (deletesRoot && lawEnabled('never-delete-the-project', context.disabledLaws)) {
+      const target = deletionTarget ?? String(args.path ?? '');
+      // A run that was handed `F:\HuayD` and asked to delete `F:\HuayD` is the
+      // one case the law allows — and it still asks, unless the user has also
+      // switched to Full Access.
+      if (context.explicitDestructiveRequest) {
+        if (mode === 'full') {
+          return {
+            allowed: true,
+            requiresApproval: false,
+            reason: `The user asked for the project to be removed and Full Access is on: "${target}".`
+          };
+        }
+        return {
+          allowed: true,
+          requiresApproval: true,
+          reason:
+            language === 'th'
+              ? `ผู้ใช้สั่งให้ลบโปรเจกต์ทั้งหมด — ยืนยันอีกครั้งก่อนลบจริง: “${target}”`
+              : `The user asked for the whole project to be removed — confirm once more: "${target}".`
+        };
+      }
+      return { allowed: false, requiresApproval: true, reason: projectDeletionRefusal(language, target) };
     }
 
-    // 2. Explicit user rules.
+    // 3. The project-scope law: files and writes stay inside the folder the run
+    // was given. Refused in every mode — "stay in the project" is not a
+    // preference the model can be argued out of.
+    const pathArgs = PATH_ARGUMENTS[name];
+    if (pathArgs && projectPath && lawEnabled('stay-in-project', context.disabledLaws)) {
+      for (const key of pathArgs) {
+        const value = args[key];
+        if (typeof value !== 'string' || !value.trim()) continue;
+        const scope = checkProjectScope(projectPath, value);
+        if (!scope.inside) {
+          return {
+            allowed: false,
+            requiresApproval: true,
+            reason: outsideProjectRefusal(language, value, projectPath)
+          };
+        }
+      }
+    }
+    if (
+      name === 'run_terminal' &&
+      typeof args.command === 'string' &&
+      projectPath &&
+      lawEnabled('stay-in-project', context.disabledLaws)
+    ) {
+      const outside = writesOutsideProject(args.command, projectPath);
+      if (outside) {
+        return {
+          allowed: false,
+          requiresApproval: true,
+          reason: outsideProjectRefusal(language, outside, projectPath)
+        };
+      }
+    }
+
+    // 4. Explicit user rules.
     if (rules.alwaysBlock?.includes(name)) {
       return { allowed: false, requiresApproval: true, reason: `Tool "${name}" is blocked in Settings → Permissions.` };
     }
@@ -155,16 +271,45 @@ export class PermissionEngine {
       };
     }
 
-    // 4. Full Access automates normal coding, still asks for the sensitive stuff.
+    // 5. Full Access automates normal coding, still asks for the sensitive stuff.
     if (mode === 'full') {
       const needsReview =
         (name === 'run_terminal' && typeof args.command === 'string' && this.isSensitiveCommand(args.command)) ||
-        name === 'delete_file' ||
+        (name === 'delete_file' && lawEnabled('confirm-recursive-delete', context.disabledLaws)) ||
         (name === 'git_commit' && args.force === true);
       return {
         allowed: true,
         requiresApproval: needsReview,
         reason: needsReview ? `"${name}" touches something the user should confirm even in Full Access.` : undefined
+      };
+    }
+
+    // 5b. A recursive delete inside the project: allowed work, but never silent
+    // under Safe/Ask — it removes many files in one call and the user should
+    // hear the exact command first.
+    if (
+      name === 'run_terminal' &&
+      typeof args.command === 'string' &&
+      isRecursiveDelete(args.command) &&
+      lawEnabled('confirm-recursive-delete', context.disabledLaws)
+    ) {
+      return {
+        allowed: true,
+        requiresApproval: true,
+        reason:
+          language === 'th'
+            ? `ลบหลายไฟล์พร้อมกันในครั้งเดียว — ยืนยันก่อนรัน: “${args.command}”`
+            : `One call that deletes several files at once — confirm before it runs: "${args.command}".`
+      };
+    }
+    if (name === 'delete_file' && lawEnabled('confirm-recursive-delete', context.disabledLaws)) {
+      return {
+        allowed: true,
+        requiresApproval: true,
+        reason:
+          language === 'th'
+            ? 'การลบไฟล์เป็นการทำลายที่ย้อนกลับไม่ได้ — ยืนยันก่อนลบ'
+            : 'Deleting a file cannot be undone — confirm before it runs.'
       };
     }
 

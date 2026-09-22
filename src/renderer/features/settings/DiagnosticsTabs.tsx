@@ -14,7 +14,6 @@ import {
   Package,
   RefreshCw,
   RotateCcw,
-  ShieldCheck,
   Stethoscope,
   Trash2
 } from 'lucide-react';
@@ -41,7 +40,10 @@ const CHANNELS: LogChannel[] = ['app', 'agent', 'provider', 'terminal'];
  * hand the folder to someone else. Redaction happens in the main process — what
  * arrives here is already safe to copy.
  */
-export const LogsTab: React.FC = () => {
+export const LogsTab: React.FC<{
+  /** True when the page above already carries this heading (Settings → General). */
+  embedded?: boolean;
+}> = ({ embedded }) => {
   const { t } = useTranslation();
   const { settings, updateSettings } = useSettingsStore();
   const [records, setRecords] = useState<LogRecord[]>([]);
@@ -84,10 +86,12 @@ export const LogsTab: React.FC = () => {
 
   return (
     <div className="space-y-3">
-      <div>
-        <h3 className="text-sm font-semibold text-d4-text">{t('settings.logs')}</h3>
-        <p className="text-[11px] text-d4-dimmed mt-0.5">{t('logs.subtitle')}</p>
-      </div>
+      {!embedded && (
+        <div>
+          <h3 className="text-sm font-semibold text-d4-text">{t('settings.logs')}</h3>
+          <p className="text-[11px] text-d4-dimmed mt-0.5">{t('logs.subtitle')}</p>
+        </div>
+      )}
 
       <div className="flex items-center gap-2 flex-wrap">
         <div className="flex items-center bg-d4-panel border border-d4-border rounded-sm p-0.5">
@@ -267,15 +271,19 @@ const AppStorageSection: React.FC = () => {
 /**
  * Updates (spec §83).
  *
- * Two steps, shown as two steps, because they are not the same decision:
- * fetching a build changes nothing on this machine, while installing closes the
- * app. The state machine and the check schedule live in the main process; this
- * view reflects them, and every action on it is a button the user pressed.
+ * This screen reports and offers; the offer itself lives in the corner card
+ * (`UpdatePrompt`), which is where the user actually lands when a version ships.
+ * The two-step cards that used to be here restated that flow in a second place
+ * and drifted from it, so what is left is one row of the same actions the card
+ * has, plus the switches that decide when D4IDE looks.
  */
-export const UpdateTab: React.FC = () => {
+export const UpdateTab: React.FC<{
+  /** True when the page above already carries this heading (Settings → General). */
+  embedded?: boolean;
+}> = ({ embedded }) => {
   const { t } = useTranslation();
   const { settings, updateSettings } = useSettingsStore();
-  const { status, busy, check, download, install } = useUpdateStore();
+  const { status, busy, check, download, install, updateAndRestart } = useUpdateStore();
   const {
     status: catalog,
     busy: catalogBusy,
@@ -296,6 +304,17 @@ export const UpdateTab: React.FC = () => {
     ? catalogDiff.providers.filter((provider) => provider.added.length > 0 || provider.changed.length > 0)
     : [];
 
+  /*
+   * One button answers both questions: is there a newer build, and do the
+   * providers serve new models. The two cards stay because their results are
+   * different things, but asking meant two buttons for one intent — and the
+   * catalogue's own button read like a second, competing "update" action.
+   */
+  const anyChecking = checking || catalogBusy || catalog.state === 'checking';
+  const runCombinedCheck = async () => {
+    await Promise.all([check(), catalogCheck()]);
+  };
+
   const label: Record<UpdateStatus['state'], string> = {
     idle: t('update.upToDate'),
     checking: t('update.checking'),
@@ -308,37 +327,43 @@ export const UpdateTab: React.FC = () => {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h3 className="text-sm font-semibold text-d4-text">{t('settings.updates')}</h3>
-        <p className="text-[11px] text-d4-dimmed mt-0.5">{t('update.subtitle')}</p>
-      </div>
+      {!embedded && (
+        <div>
+          <h3 className="text-sm font-semibold text-d4-text">{t('settings.updates')}</h3>
+          <p className="text-[11px] text-d4-dimmed mt-0.5">{t('update.subtitle')}</p>
+        </div>
+      )}
 
-      <div className="flex items-start gap-2 rounded border border-d4-border bg-d4-surface p-2 text-[11px] text-d4-muted">
-        <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0 text-d4-accent" />
-        <p>{t('update.detectionOnly')}</p>
-      </div>
-
-      <div className="bg-d4-surface border border-d4-border rounded p-3 space-y-2 text-[11px]">
-        <div className="flex items-center gap-2">
-          <span className="text-d4-text font-semibold">
-            D4IDE {currentVersion}
-          </span>
+      {/* One card for one question: which build is this, and is it the newest.
+          The "only looks" paragraph that used to sit above it repeated the
+          subtitle word for word, and a second copy of a rule is not a warning. */}
+      <div className="bg-d4-surface border border-d4-border rounded p-3 space-y-1.5 text-[11px]">
+        <div className="flex flex-wrap items-baseline gap-2">
+          <span className="text-sm font-semibold text-d4-text">D4IDE {currentVersion}</span>
           {status.version && (status.state === 'available' || status.state === 'ready') ? (
             <span className={status.state === 'ready' ? 'text-d4-success font-semibold' : 'text-d4-accent font-semibold'}>
               → {status.version}
             </span>
           ) : null}
           {checking ? <RefreshCw className="w-3 h-3 animate-spin text-d4-accent" /> : null}
+          {status.checkedAt ? (
+            <span className="text-d4-dimmed">
+              {t('update.lastChecked', { time: formatRelativeTime(status.checkedAt) })}
+            </span>
+          ) : null}
+          {/* The one check button on this screen: it looks for a new build and
+              asks every provider about new models in the same click. */}          
+          <button
+            disabled={anyChecking}
+            onClick={() => void runCombinedCheck()}
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-surface border border-d4-border text-[11px] text-d4-text hover:bg-d4-subtle disabled:opacity-40"
+          >
+            <RefreshCw className={`w-3 h-3 ${anyChecking ? 'animate-spin' : ''}`} />
+            {t('update.checkBoth')}
+          </button>
         </div>
-        <div className={status.state === 'error' ? 'text-d4-error' : 'text-d4-muted'}>
-          {label[status.state]}
-          {status.error && status.state === 'error' ? <span className="block text-d4-dimmed">{status.error}</span> : null}
-        </div>
-        {status.checkedAt ? (
-          <div className="text-d4-dimmed">
-            {t('update.lastChecked', { time: formatRelativeTime(status.checkedAt) })}
-          </div>
-        ) : null}
+        <div className={status.state === 'error' ? 'text-d4-error' : 'text-d4-muted'}>{label[status.state]}</div>
+        {status.error && status.state === 'error' ? <div className="text-d4-dimmed">{status.error}</div> : null}
         {status.notes ? (
           <div className="space-y-1">
             <div className="text-d4-dimmed">{t('update.notesTitle')}</div>
@@ -349,124 +374,119 @@ export const UpdateTab: React.FC = () => {
         ) : null}
       </div>
 
-      {/* Step one: fetch it. Step two: let it close the app. */}
-      <div className="space-y-2">
-        <div className="rounded border border-d4-border bg-d4-surface p-3 text-[11px]">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-d4-text font-medium">
-              <Download className="w-3.5 h-3.5 text-d4-accent" />
-              {t('update.step1')}
-            </div>
+      {/* The same actions the corner card offers, for anyone who came here
+          looking for them. Nothing on it runs by itself — and nothing appears
+          when there is nothing to act on: a row of "—" is an empty box, not an
+          explanation. */}
+      {(status.state === 'available' || status.state === 'downloading' || status.state === 'ready') && (
+      <div className="rounded border border-d4-border bg-d4-surface p-3 text-[11px] space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-d4-text font-medium">
+            <Download className="w-3.5 h-3.5 text-d4-accent" />
+            {t('update.manualTitle')}
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
             {status.state === 'available' ? (
-              <button
-                disabled={busy}
-                onClick={() => void download()}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-accent text-black text-[11px] font-medium disabled:opacity-40"
-              >
-                <Download className="w-3 h-3" />
-                {t('update.download')}
-              </button>
+              <>
+                <button
+                  disabled={busy}
+                  onClick={() => void download()}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-accent text-black text-[11px] font-medium disabled:opacity-40"
+                >
+                  <Download className="w-3 h-3" />
+                  {t('update.promptUpdate')}
+                </button>
+                <button
+                  disabled={busy || agentBusy}
+                  title={agentBusy ? t('update.agentBusy') : undefined}
+                  onClick={() => void updateAndRestart()}
+                  className="px-3 py-1.5 rounded-sm border border-d4-border text-[11px] text-d4-muted hover:text-d4-text disabled:opacity-40"
+                >
+                  {t('update.promptUpdateAndRestart')}
+                </button>
+              </>
             ) : status.state === 'downloading' ? (
               <span className="font-mono text-d4-accent">{status.percent ?? 0}%</span>
             ) : status.state === 'ready' ? (
-              <span className="flex items-center gap-1 text-d4-success">
-                <Check className="w-3 h-3" />
-                {t('update.readyToInstall')}
-              </span>
-            ) : (
-              <span className="text-d4-dimmed">—</span>
-            )}
-          </div>
-          <p className="mt-1 text-d4-dimmed">{t('update.step1HintLong')}</p>
-          {status.state === 'downloading' ? (
-            <div className="mt-2 h-1 rounded-full bg-d4-border overflow-hidden">
-              <div
-                className="h-full bg-d4-accent transition-[width] duration-300"
-                style={{ width: `${Math.min(100, Math.max(0, status.percent ?? 0))}%` }}
-              />
-            </div>
-          ) : null}
-        </div>
-
-        <div className="rounded border border-d4-border bg-d4-surface p-3 text-[11px]">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-d4-text font-medium">
-              <RotateCcw className="w-3.5 h-3.5 text-d4-accent" />
-              {t('update.step2')}
-            </div>
-            <button
-              disabled={busy || agentBusy || status.state !== 'ready'}
-              title={agentBusy ? t('update.agentBusy') : t('update.step2HintLong')}
-              onClick={() => void install()}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-accent text-black text-[11px] font-medium disabled:opacity-40"
-            >
-              <RotateCcw className="w-3 h-3" />
-              {t('update.install')}
-            </button>
-          </div>
-          <p className="mt-1 text-d4-dimmed">{t('update.step2HintLong')}</p>
-          {status.state === 'ready' ? (
-            <p className={`mt-1 ${agentBusy ? 'text-d4-warning' : 'text-d4-muted'}`}>
-              {agentBusy ? t('update.agentBusy') : t('update.downloadedNote', { version: status.version || '' })}
-            </p>
-          ) : null}
-        </div>
-      </div>
-
-      {/* Detection settings. There is deliberately no "download automatically":
-          the rule this whole screen states is that nothing happens without a
-          click, and a switch to the contrary would make that a lie. */}
-      <div className="space-y-2 rounded border border-d4-border bg-d4-surface p-3 text-[11px]">
-        <label className="flex items-center gap-2 text-d4-muted">
-          <input
-            type="checkbox"
-            checked={autoCheck}
-            onChange={(e) => updateSettings({ updateCheckEnabled: e.target.checked })}
-            className="accent-d4-accent"
-          />
-          {t('update.autoCheck')}
-        </label>
-        <p className="text-d4-dimmed">{t('update.autoCheckHint')}</p>
-
-        {autoCheck ? (
-          <div className="space-y-2 pl-6">
-            <label className="flex items-center gap-2 text-d4-muted">
-              <input
-                type="checkbox"
-                checked={settings?.checkUpdatesOnLaunch !== false}
-                onChange={(e) => updateSettings({ checkUpdatesOnLaunch: e.target.checked })}
-                className="accent-d4-accent"
-              />
-              {t('update.checkOnLaunch')}
-            </label>
-            <p className="text-d4-dimmed">{t('update.checkOnLaunchHint')}</p>
-            <label className="flex items-center gap-2 text-d4-muted">
-              <span>{t('update.intervalLabel')}</span>
-              <select
-                value={settings?.updateCheckIntervalHours ?? 6}
-                onChange={(e) => updateSettings({ updateCheckIntervalHours: Number(e.target.value) })}
-                className="bg-d4-bg border border-d4-border rounded-sm px-1.5 py-0.5 text-[11px] text-d4-text"
+              <button
+                disabled={busy || agentBusy}
+                title={agentBusy ? t('update.agentBusy') : undefined}
+                onClick={() => void install()}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-accent text-black text-[11px] font-medium disabled:opacity-40"
               >
-                {[1, 6, 12, 24].map((hours) => (
-                  <option key={hours} value={hours}>
-                    {t('update.hours', { count: hours })}
-                  </option>
-                ))}
-              </select>
-            </label>
+                <RotateCcw className="w-3 h-3" />
+                {t('update.promptRestart')}
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {status.state === 'downloading' ? (
+          <div className="h-1.5 rounded-full bg-d4-border overflow-hidden">
+            <div
+              className="h-full bg-d4-accent transition-[width] duration-300"
+              style={{ width: `${Math.min(100, Math.max(0, status.percent ?? 0))}%` }}
+            />
           </div>
         ) : null}
 
-        <div>
-          <button
-            disabled={busy}
-            onClick={() => void check()}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-surface border border-d4-border text-[11px] text-d4-text hover:bg-d4-subtle disabled:opacity-40"
-          >
-            <RefreshCw className={`w-3 h-3 ${busy ? 'animate-spin' : ''}`} />
-            {t('update.check')}
-          </button>
+        <p className={status.state === 'ready' && agentBusy ? 'text-d4-warning' : 'text-d4-dimmed'}>
+          {status.state === 'ready'
+            ? agentBusy
+              ? t('update.agentBusy')
+              : t('update.laterKeepsUpdate')
+            : t('update.manualHint')}
+        </p>
+      </div>
+      )}
+
+      {/* Detection settings, on one row: whether to look, whether to look at
+          launch, how often, and a way to look right now. There is deliberately
+          no "download automatically" — the rule this screen states is that
+          nothing happens without a click, and a switch to the contrary would
+          make that a lie. */}
+      <div className="space-y-2 rounded border border-d4-border bg-d4-surface p-3 text-[11px]">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <label className="flex items-center gap-2 text-d4-text cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoCheck}
+              onChange={(e) => updateSettings({ updateCheckEnabled: e.target.checked })}
+              className="accent-d4-accent"
+            />
+            {t('update.autoCheck')}
+          </label>
+
+          {autoCheck ? (
+            <>
+              <label className="flex items-center gap-2 text-d4-muted cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings?.checkUpdatesOnLaunch !== false}
+                  onChange={(e) => updateSettings({ checkUpdatesOnLaunch: e.target.checked })}
+                  className="accent-d4-accent"
+                />
+                {t('update.checkOnLaunch')}
+              </label>
+              <label className="flex items-center gap-2 text-d4-muted">
+                <span>{t('update.intervalLabel')}</span>
+                <select
+                  value={settings?.updateCheckIntervalHours ?? 6}
+                  onChange={(e) => updateSettings({ updateCheckIntervalHours: Number(e.target.value) })}
+                  className="bg-d4-bg border border-d4-border rounded-sm px-1.5 py-0.5 text-[11px] text-d4-text"
+                >
+                  {[1, 6, 12, 24].map((hours) => (
+                    <option key={hours} value={hours}>
+                      {t('update.hours', { n: hours })}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : null}
+
         </div>
+        <p className="text-d4-dimmed">{t('update.autoCheckHint')}</p>
       </div>
 
       {/* The same rule as the updater, applied to what the providers serve:
@@ -478,6 +498,8 @@ export const UpdateTab: React.FC = () => {
             {t('catalog.title')}
           </div>
           <div className="flex items-center gap-1.5">
+            {/* Checking happens from the single button above; what lives here
+                is only the decision on changes already found. */}
             {catalog.state === 'changes' ? (
               <>
                 <button
@@ -495,16 +517,7 @@ export const UpdateTab: React.FC = () => {
                   {t('catalog.discard')}
                 </button>
               </>
-            ) : (
-              <button
-                disabled={catalogBusy}
-                onClick={() => void catalogCheck()}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-d4-surface border border-d4-border text-[11px] text-d4-text hover:bg-d4-subtle disabled:opacity-40"
-              >
-                <RefreshCw className={`w-3 h-3 ${catalogBusy || catalog.state === 'checking' ? 'animate-spin' : ''}`} />
-                {t('catalog.checkNow')}
-              </button>
-            )}
+            ) : null}
             {catalog.undoAvailable ? (
               <button
                 disabled={catalogBusy}
@@ -579,7 +592,7 @@ export const UpdateTab: React.FC = () => {
             >
               {[6, 12, 24, 72].map((hours) => (
                 <option key={hours} value={hours}>
-                  {t('update.hours', { count: hours })}
+                  {t('update.hours', { n: hours })}
                 </option>
               ))}
             </select>
@@ -617,6 +630,39 @@ export const UpdateTab: React.FC = () => {
           <p>{t('update.errorHint')}</p>
         </div>
       )}
+
+      {/* The watch on the provider being talked to. It lives on this tab
+          because it is a background check like the other two, but its failure
+          shows up as a red banner over the chat, not here. */}
+      <div className="rounded border border-d4-border bg-d4-surface p-2.5 text-[11px] space-y-1.5">
+        <div className="font-medium text-d4-text">{t('providers.healthWatch')}</div>
+        <p className="text-d4-dimmed">{t('providers.healthWatchHint')}</p>
+        <label className="flex items-center gap-2 text-d4-muted">
+          <input
+            type="checkbox"
+            checked={settings?.providerHealthCheckEnabled !== false}
+            onChange={(e) => updateSettings({ providerHealthCheckEnabled: e.target.checked })}
+            className="accent-d4-accent"
+          />
+          {t('providers.healthWatch')}
+        </label>
+        {settings?.providerHealthCheckEnabled !== false && (
+          <label className="flex items-center gap-2 pl-6 text-d4-muted">
+            <span>{t('providers.healthWatchInterval')}</span>
+            <select
+              value={settings?.providerHealthCheckIntervalMinutes ?? 10}
+              onChange={(e) => updateSettings({ providerHealthCheckIntervalMinutes: Number(e.target.value) })}
+              className="bg-d4-bg border border-d4-border rounded-sm px-1.5 py-0.5 text-[11px] text-d4-text"
+            >
+              {[5, 10, 30, 60].map((minutes) => (
+                <option key={minutes} value={minutes}>
+                  {t('update.minutes', { n: minutes })}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
 
       <div className="flex items-center gap-2 text-[10px] text-d4-dimmed">
         <Bug className="w-3 h-3" />

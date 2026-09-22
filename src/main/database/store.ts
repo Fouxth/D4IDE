@@ -31,12 +31,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   routingProfile: 'balanced',
   reasoningEffort: 'medium',
   requireLogin: true,
-  dailyBudget: 5,
-  monthlyBudget: 50,
-  perRequestBudget: 0.5,
-  budgetHardStop: false,
-  autoThriftOnBudget: true,
-  budgetWarnThreshold: 0.8,
   // Token economy. The context budget is what a single request may carry; the
   // run budget is what one task may spend before it stops and says so.
   thriftMode: false,
@@ -52,11 +46,19 @@ const DEFAULT_SETTINGS: AppSettings = {
   favoriteModels: [],
   recentModels: [],
   recentProjects: [],
+  spaces: [],
   sessionOrder: [],
+  closedSessionIds: [],
+  // Local runtimes stay out of the model picker until the user asks for them.
+  localProvidersEnabled: false,
   firstRunComplete: false,
   removedProviderIds: [],
   logLevel: 'info',
   desktopNotifications: true,
+  notificationSound: 'chime',
+  // A law is only switched off when the user says so; the default is every one
+  // of them in force.
+  disabledLaws: [],
   // Minimal by default; "ask" makes the agent ask the user per project.
   designStyle: 'minimal',
   askDesignBeforeUiWork: true,
@@ -70,7 +72,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   skippedUpdateVersion: '',
   catalogCheckEnabled: true,
   catalogCheckIntervalHours: 24,
-  lastCatalogCheckAt: 0
+  lastCatalogCheckAt: 0,
+  // The health watch on the provider being talked to: on by default at a cost
+  // of one models request per 10 minutes, paused while a run is in flight.
+  providerHealthCheckEnabled: true,
+  providerHealthCheckIntervalMinutes: 10
 };
 
 /** Masked display value for a stored key — never the key itself (spec §29). */
@@ -355,17 +361,41 @@ export class AppDataStore {
 
     const merged = this.mergeWithPresets(stored, removed);
 
+    let keyReadFailed = false;
     const decrypted = merged.map((p) => {
       let apiKey = '';
-      if (p.apiKey) apiKey = keyStorage.decrypt(p.apiKey);
+      let keyUnreadable = false;
+      if (p.apiKey) {
+        const read = keyStorage.decryptChecked(p.apiKey);
+        apiKey = read.value;
+        if (read.failed) {
+          // Before `app.whenReady()` the keychain cannot serve anything yet —
+          // that is our timing, not the user's data. After that, a blob that
+          // will not decrypt is genuinely unreadable (the keychain changed), and
+          // pretending the provider simply has no key is a lie the UI repeats.
+          if (this.keychainServing()) keyUnreadable = true;
+          else keyReadFailed = true;
+        }
+      }
       return {
         ...p,
         apiKey,
         hasApiKey: !!apiKey,
+        keyUnreadable,
         apiKeyPreview: maskApiKey(apiKey),
-        status: this.deriveStatus(p, !!apiKey)
+        status: this.deriveStatus(p, !!apiKey, keyUnreadable)
       };
     });
+
+    // "Not decryptable *yet*" must never be cached: this module is read during
+    // startup, and caching that answer under the providers file's stamp would
+    // freeze every keyed provider as keyless for the life of the process — no
+    // `Authorization` header on requests, no catalogue check, and the UI calling
+    // a working provider "needs a key". Answer honestly this once and let the
+    // next read succeed.
+    if (keyReadFailed) {
+      return decrypted;
+    }
 
     // Taken *after* the rebuild: `mergeWithPresets` may have written a backfill
     // to disk, and caching the stamp taken before that would miss our own edit.
@@ -454,7 +484,25 @@ export class AppDataStore {
    */
   private static readonly ERROR_TTL_MS = 10 * 60_000;
 
-  private deriveStatus(p: ProviderConfig, hasKey: boolean): ProviderConfig['status'] {
+  /**
+   * Whether the OS keychain has had its chance to serve us yet.
+   *
+   * `safeStorage` cannot decrypt anything before `app.whenReady()`, so a failure
+   * then means "ask again in a moment" — while the same failure after startup
+   * means the key on file is genuinely dead.
+   */
+  private keychainServing(): boolean {
+    try {
+      return typeof app?.isReady === 'function' ? app.isReady() : true;
+    } catch {
+      return true;
+    }
+  }
+
+  private deriveStatus(p: ProviderConfig, hasKey: boolean, keyUnreadable = false): ProviderConfig['status'] {
+    // A key we cannot decrypt is not "no key": no request can be authorized, so
+    // routing must not choose this provider and the hub must say why.
+    if (keyUnreadable) return 'error';
     if (p.status === 'connected') return p.status;
     if (p.status === 'error') {
       if (this.isFreshError(p)) return 'error';
@@ -470,20 +518,37 @@ export class AppDataStore {
    * the provider hub must agree on this: reading the raw `status` field made the
    * agent warn about a failure the UI had already aged out.
    */
-  isFreshError(p: Pick<ProviderConfig, 'status' | 'lastTestedAt'>): boolean {
+  isFreshError(p: Pick<ProviderConfig, 'status' | 'lastTestedAt' | 'keyUnreadable'>): boolean {
+    // An unreadable key has no expiry: it stays wrong until the user acts.
+    if (p.keyUnreadable) return true;
     return p.status === 'error' && Date.now() - (p.lastTestedAt ?? 0) < AppDataStore.ERROR_TTL_MS;
   }
 
-  saveProviders(providers: ProviderConfig[]): void {
+  /**
+   * `clearKeys` is how a caller says "delete this key"; passing an empty `apiKey`
+   * does *not* mean that, because an empty key is also what a provider arrives
+   * with when its key could not be decrypted on the read that produced it.
+   */
+  saveProviders(providers: ProviderConfig[], options: { clearKeys?: string[] } = {}): void {
+    const onDisk = new Map(
+      (readJson<ProviderConfig[]>(this.providersFile, []) || []).map((p) => [p.id, p.apiKey ?? ''])
+    );
+
     // Accept both encrypted values coming back from storage and plaintext keys
     // typed by the user in the renderer; never persist plaintext.
     const toSave = providers.map((p) => {
       let apiKey = p.apiKey ?? '';
+      if (!apiKey && !options.clearKeys?.includes(p.id)) {
+        // Keep the ciphertext we already have. Writing the empty value back
+        // would destroy a key the user pasted — the read that produced it may
+        // simply have been unable to decrypt yet (see `getProviders`).
+        apiKey = onDisk.get(p.id) ?? '';
+      }
       if (apiKey && !apiKey.startsWith('dpapi:') && !apiKey.startsWith('aes:')) {
         apiKey = keyStorage.encrypt(apiKey);
       }
       // Derived/sanitized fields are recomputed on read; don't persist them.
-      const { hasApiKey: _hasApiKey, apiKeyPreview: _apiKeyPreview, ...rest } = p;
+      const { hasApiKey: _hasApiKey, apiKeyPreview: _apiKeyPreview, keyUnreadable: _keyUnreadable, ...rest } = p;
       return { ...rest, apiKey } as ProviderConfig;
     });
     writeJson(this.providersFile, toSave);
@@ -507,8 +572,10 @@ export class AppDataStore {
       target.apiKey = apiKey ?? '';
       target.status = apiKey ? 'unknown' : target.type === 'ollama' ? 'local' : 'not_configured';
       target.lastError = undefined;
+      target.keyUnreadable = false;
     }
-    this.saveProviders(providers);
+    // Explicit intent: `null` means "forget this key", not "I did not touch it".
+    this.saveProviders(providers, { clearKeys: apiKey ? [] : [providerId] });
     return this.getSanitizedProviders();
   }
 
@@ -600,6 +667,38 @@ export class AppDataStore {
       const next = [...this.usageCache, record];
       this.usageCache = next.length > AppDataStore.USAGE_CACHE_LIMIT ? next.slice(-AppDataStore.USAGE_CACHE_LIMIT) : next;
     }
+  }
+
+  /**
+   * Stores a finished run's report on its request's usage row.
+   *
+   * The report used to be a card in the conversation. It lives here instead for
+   * two reasons: a request's cost and a request's outcome answer the same
+   * question, and the transcript is for the work, not for the paperwork after
+   * it. Returns false when nothing was recorded for the session — the caller
+   * then leaves the report out entirely rather than inventing a row for it.
+   */
+  saveRunSummary(sessionId: string, summary: string, request: string): boolean {
+    if (!sessionId) return false;
+
+    if (this.sqlite) {
+      const updated = this.sqlite.attachUsageSummary(sessionId, summary, request);
+      // The cached log holds the row that was just changed; dropping it is
+      // cheaper than finding and rewriting the one entry in place.
+      if (updated) this.usageCache = null;
+      return updated;
+    }
+
+    const records = this.getUsageRecords();
+    for (let index = records.length - 1; index >= 0; index--) {
+      if (records[index].sessionId !== sessionId) continue;
+      const next = [...records];
+      next[index] = { ...next[index], summary, summaryRequest: request };
+      writeJson(this.usageFile, next);
+      this.usageCache = next;
+      return true;
+    }
+    return false;
   }
 
   /** Replace the whole usage log (used by "reset usage"). */
