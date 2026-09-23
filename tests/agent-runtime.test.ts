@@ -1751,3 +1751,109 @@ describe('agent runtime — what the model is told up front', () => {
     expect(provider.prompts[0]).not.toContain('Design system in force');
   });
 });
+
+/**
+ * The AI team: one job, three seats.
+ *
+ * The seat assignment lives in settings as `provider:model`. What these tests
+ * buy is the guarantee that the *request* actually travels to the assigned
+ * model — not that the settings were read — because a seat that is configured
+ * but silently ignored looks identical to one that is working.
+ */
+describe('agent runtime — AI team (model per role)', () => {
+  const TEAM_PROVIDER_ID = 'team-provider';
+  const TEAM_MODEL_ID = 'team-analyst-x';
+
+  /** Records which model every request asked for. */
+  class ModelRecordingProvider extends ScriptedProvider {
+    public requestedModels: string[] = [];
+    async streamChat(req: any, onChunk: (chunk: any) => void) {
+      this.requestedModels.push(String(req.model ?? ''));
+      return super.streamChat(req, onChunk);
+    }
+  }
+
+  beforeEach(() => {
+    // The seat's provider must exist and be enabled, or teamSeat (deliberately)
+    // nulls it — so the fixture registers it like a real second provider.
+    const providers = appStore.getProviders();
+    appStore.saveProviders([
+      ...providers,
+      {
+        id: TEAM_PROVIDER_ID,
+        name: 'Team Provider',
+        type: 'custom',
+        enabled: true,
+        baseUrl: 'http://127.0.0.1:9/v1',
+        requiresApiKey: false,
+        models: [
+          {
+            id: TEAM_MODEL_ID,
+            name: 'Team Model',
+            providerId: TEAM_PROVIDER_ID,
+            supportsTools: true,
+            supportsVision: false,
+            inputPricePerMillion: 1,
+            outputPricePerMillion: 2,
+            cachedInputPricePerMillion: 0
+          }
+        ]
+      }
+    ]);
+    providerManager.reloadProviders();
+  });
+
+  it('sends plan-mode requests to the planner seat', async () => {
+    appStore.saveSettings({ aiTeam: { planner: `${TEAM_PROVIDER_ID}:${TEAM_MODEL_ID}`, analyst: '', executor: '' } });
+    const planner = new ModelRecordingProvider([[]]);
+    const main = new ModelRecordingProvider([[]]);
+    providerManager.setProviderInstance(PROVIDER_ID, main as any);
+    providerManager.setProviderInstance(TEAM_PROVIDER_ID, planner as any);
+
+    const { win, events } = createWindow();
+    const run = agentRuntime.run(win, { prompt: 'Plan a change', mode: 'plan', projectPath, sessionId: 's_team_plan' });
+    await waitFor(() => timelineOf(events).some((item) => item.type === 'plan'));
+    agentRuntime.approvePlan();
+    await run;
+
+    // Every planning request went to the seat, and every post-approval build
+    // request stayed on the main model (the executor seat is empty here) — the
+    // two lists never mix, which is the actual routing guarantee.
+    expect(planner.requestedModels.length).toBeGreaterThan(0);
+    expect(planner.requestedModels.every((m) => m === TEAM_MODEL_ID)).toBe(true);
+    expect(main.requestedModels.every((m) => m === MODEL_ID)).toBe(true);
+    // The run says which model wrote the plan, so the user is never guessing.
+    expect(
+      timelineOf(events).some((item) => /AI Team/.test(item.title) && /team-provider\/team-analyst-x/.test(item.content))
+    ).toBe(true);
+  });
+
+  it('keeps the executor seat away from a greeting — a greeting is not work', async () => {
+    appStore.saveSettings({ aiTeam: { planner: '', analyst: '', executor: `${TEAM_PROVIDER_ID}:${TEAM_MODEL_ID}` } });
+    const executor = new ModelRecordingProvider([[]]);
+    const main = new ModelRecordingProvider([[]]);
+    providerManager.setProviderInstance(PROVIDER_ID, main as any);
+    providerManager.setProviderInstance(TEAM_PROVIDER_ID, executor as any);
+
+    const { win } = createWindow();
+    await agentRuntime.run(win, { prompt: 'สวัสดีครับ', mode: 'build', projectPath, sessionId: 's_team_hello' });
+
+    expect(main.requestedModels.length).toBeGreaterThan(0);
+    expect(executor.requestedModels).toHaveLength(0);
+  });
+
+  it('falls back to the main model when a seat names a disabled provider', async () => {
+    appStore.saveSettings({ aiTeam: { planner: 'missing-provider:some-model', analyst: '', executor: '' } });
+    const main = new ModelRecordingProvider([[]]);
+    providerManager.setProviderInstance(PROVIDER_ID, main as any);
+
+    const { win, events } = createWindow();
+    const run = agentRuntime.run(win, { prompt: 'Plan a change', mode: 'plan', projectPath, sessionId: 's_team_fallback' });
+    await waitFor(() => timelineOf(events).some((item) => item.type === 'plan'));
+    agentRuntime.approvePlan();
+    await run;
+
+    // One typo in Settings must cost a seat, not the run.
+    expect(main.requestedModels.length).toBeGreaterThan(0);
+  });
+});

@@ -27,6 +27,8 @@ import {
   X
 } from 'lucide-react';
 import { FileChange } from '../../../shared/types';
+import { useChangesStore } from '../../stores/changesStore';
+import { useUiStore } from '../../stores/uiStore';
 import { commandChipFor } from '../../../shared/builtin-commands';
 import { Markdown } from '../../components/Markdown';
 import { useTranslation } from 'react-i18next';
@@ -763,6 +765,75 @@ const QuestionCard: React.FC<{ item: AgentTimelineItem; waiting: boolean }> = ({
  * note is a third answer, so the run does not have to be cancelled to be
  * changed.
  */
+/**
+ * The end-of-run "changed N files" card, now with a way in.
+ *
+ * It used to be a dead end: a list of paths the user could read but not act on,
+ * sitting next to a changes panel that holds the actual diffs. A row is the
+ * same file the panel lists, so clicking it opens that panel with the diff —
+ * for a file from an *earlier* run, whose live change record is gone, the diff
+ * still renders right from the card's own data instead of failing silently.
+ */
+const ChangedFilesCard: React.FC<{
+  eventId: string;
+  title: string;
+  files: Array<{
+    path: string;
+    type: FileChange['type'];
+    additions: number;
+    deletions: number;
+  }>;
+}> = ({ eventId, title, files }) => {
+  const { t } = useTranslation();
+  const changes = useChangesStore((state) => state.changes);
+  const setActiveDiff = useChangesStore((state) => state.setActiveDiff);
+  const showRightPanel = useUiStore((state) => state.showRightPanel);
+
+  const open = (file: { path: string; type: FileChange['type']; additions: number; deletions: number }) => {
+    const live = changes.find((change) => change.path === file.path);
+    if (live) {
+      setActiveDiff(live);
+    } else {
+      // An older run's record is not in the store anymore; rebuild a read-only
+      // record from what the card itself carries so the click still opens.
+      setActiveDiff({
+        path: file.path,
+        relativePath: file.path,
+        type: file.type,
+        additions: file.additions,
+        deletions: file.deletions
+      });
+    }
+    showRightPanel('changes');
+  };
+
+  return (
+    <div className="rounded-md border border-d4-border-subtle bg-d4-panel/60 overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-d4-border-subtle text-[12px] font-semibold text-d4-text">
+        <FileCode className="w-3.5 h-3.5 text-d4-accent" />
+        <span>{title}</span>
+      </div>
+      <div className="px-3 py-2 space-y-0.5">
+        {files.map((file) => (
+          <button
+            key={`${eventId}_${file.path}`}
+            onClick={() => open(file)}
+            title={t('timeline.openDiff')}
+            className="w-full flex items-center gap-2 text-[11px] leading-snug rounded px-1 -mx-1 hover:bg-d4-surface transition-colors text-left"
+          >
+            <span className="w-3 shrink-0 text-d4-dimmed" title={file.type}>
+              {file.type === 'created' ? 'A' : file.type === 'deleted' ? 'D' : 'M'}
+            </span>
+            <span className="flex-1 min-w-0 truncate font-mono text-d4-muted">{file.path}</span>
+            {file.additions > 0 && <span className="shrink-0 text-emerald-400">+{file.additions}</span>}
+            {file.deletions > 0 && <span className="shrink-0 text-red-400">−{file.deletions}</span>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const PlanCard: React.FC<{ item: AgentTimelineItem; waiting: boolean }> = ({ item, waiting }) => {
   const { t } = useTranslation();
   const approvePlan = useAgentStore((state) => state.approvePlan);
@@ -1115,24 +1186,7 @@ export const AgentTimeline: React.FC = () => {
           deletions: number;
         }>;
         return (
-          <div key={item.id} className="rounded-md border border-d4-border-subtle bg-d4-panel/60 overflow-hidden">
-            <div className="flex items-center gap-2 px-3 py-2 border-b border-d4-border-subtle text-[12px] font-semibold text-d4-text">
-              <FileCode className="w-3.5 h-3.5 text-d4-accent" />
-              <span>{item.title}</span>
-            </div>
-            <div className="px-3 py-2 space-y-0.5">
-              {files.map((file) => (
-                <div key={`${item.id}_${file.path}`} className="flex items-center gap-2 text-[11px] leading-snug">
-                  <span className="w-3 shrink-0 text-d4-dimmed" title={file.type}>
-                    {file.type === 'created' ? 'A' : file.type === 'deleted' ? 'D' : 'M'}
-                  </span>
-                  <span className="flex-1 min-w-0 truncate font-mono text-d4-muted">{file.path}</span>
-                  {file.additions > 0 && <span className="shrink-0 text-emerald-400">+{file.additions}</span>}
-                  {file.deletions > 0 && <span className="shrink-0 text-red-400">−{file.deletions}</span>}
-                </div>
-              ))}
-            </div>
-          </div>
+          <ChangedFilesCard key={item.id} eventId={item.id} title={item.title} files={files} />
         );
       }
       return (

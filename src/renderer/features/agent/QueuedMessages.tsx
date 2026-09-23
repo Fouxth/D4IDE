@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, ChevronDown, ChevronRight, GripVertical, Pencil, Send, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, GripVertical, Pause, Pencil, Play, Send, Trash2, X } from 'lucide-react';
 import { useQueueStore } from '../../stores/queueStore';
 import { reorderTargets } from '../../lib/queue-reorder';
 import { TaskQueueItem } from '../../../shared/types';
@@ -31,6 +31,11 @@ export const QueuedMessages: React.FC = () => {
   const runItem = useQueueStore((state) => state.runItem);
   const reorderItems = useQueueStore((state) => state.reorderItems);
   const moveItem = useQueueStore((state) => state.moveItem);
+  // Queue-wide controls. They used to live in the sidebar's queue tab; the tab
+  // is gone, and these are the only bits of it nothing else could do.
+  const autoRun = useQueueStore((state) => state.autoRun);
+  const pauseAll = useQueueStore((state) => state.pauseAll);
+  const resumeAll = useQueueStore((state) => state.resumeAll);
 
   /** Ids of the rows showing their full text. */
   const [open, setOpen] = useState<string[]>([]);
@@ -134,6 +139,29 @@ export const QueuedMessages: React.FC = () => {
           {t('agent.queueTitle', { count: waiting.length })}
         </span>
         <span className="flex-1 h-px bg-d4-border-subtle" />
+        {/*
+         * Pause/resume and clear, carried over from the queue tab this strip
+         * replaces. A paused queue must stay visible somewhere, and the row
+         * header is where the queue itself already lives.
+         */}
+        <button
+          type="button"
+          onClick={() => (autoRun ? pauseAll() : resumeAll())}
+          title={autoRun ? t('rightSidebar.pauseQueue') : t('rightSidebar.resumeQueue')}
+          className={`p-0.5 rounded-sm transition-colors ${
+            autoRun ? 'text-d4-dimmed hover:text-d4-text' : 'text-d4-warning'
+          }`}
+        >
+          {autoRun ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+        </button>
+        <button
+          type="button"
+          onClick={() => useQueueStore.getState().clearFinished()}
+          title={t('rightSidebar.clearFinished')}
+          className="p-0.5 rounded-sm text-d4-dimmed hover:text-d4-text transition-colors"
+        >
+          <Trash2 className="w-3 h-3" />
+        </button>
       </div>
 
       {waiting.map((item, index) => {

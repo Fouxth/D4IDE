@@ -12,6 +12,7 @@ import {
   UsageRecord
 } from '../../shared/types';
 import { keyStorage } from '../security/key-storage';
+import { DEFAULT_TEAM_CONFIG } from '../../shared/ai-team';
 import { buildDefaultProviders, PROVIDER_PRESETS } from '../ai/providers/catalog';
 import { SqliteRepo } from './sqlite-store';
 import { BufferSnapshot, Mission } from '../../shared/types';
@@ -38,6 +39,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   runTokenBudget: 0,
   cheaperModelForSmallTasks: false,
   cheapModelId: '',
+  aiTeam: DEFAULT_TEAM_CONFIG,
   autoFallback: false,
   fallbackChain: [],
   toolTimeoutMs: 120000,
@@ -323,7 +325,12 @@ export class AppDataStore {
     if (this.settingsCache && this.settingsCache.stamp === stamp) return this.settingsCache.value;
 
     const stored = readJson<Partial<AppSettings>>(this.settingsFile, {});
-    const value = { ...DEFAULT_SETTINGS, ...stored };
+    // A role-level merge, not just the top-level spread: a settings file written
+    // before the AI team existed carries no `aiTeam`, and `{...defaults, ...stored}`
+    // would keep that — fine — but a file written when a seat was filled and later
+    // edited by hand with one seat missing must keep the other seats, not reset
+    // the whole team to empty.
+    const value = { ...DEFAULT_SETTINGS, ...stored, aiTeam: { ...DEFAULT_TEAM_CONFIG, ...(stored.aiTeam ?? {}) } };
     this.settingsCache = { stamp, value };
     return value;
   }

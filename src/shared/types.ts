@@ -2,6 +2,7 @@
 
 export type { DesignStyle } from './design-profiles';
 export type { ThemeId } from './theme';
+import type { TeamConfig } from './ai-team';
 import type { DesignStyle } from './design-profiles';
 import type { ThemeId } from './theme';
 
@@ -571,6 +572,12 @@ export interface AppSettings {
   cheaperModelForSmallTasks: boolean;
   /** Provider/model used for those small jobs, `provider:model`. */
   cheapModelId: string;
+  /**
+   * The AI team: a model per role (planner / analyst / executor), `provider:model`.
+   * An empty seat keeps the composer's model — the feature is dormant until a
+   * seat is filled, and a malformed seat falls back the same way.
+   */
+  aiTeam: TeamConfig;
   autoFallback: boolean;
   fallbackChain: string[];
   toolTimeoutMs: number;

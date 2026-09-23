@@ -20,44 +20,24 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChangesStore } from '../../stores/changesStore';
-import { useQueueStore } from '../../stores/queueStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { useProject, useProjectStore } from '../../stores/projectStore';
-import { useUsageStore } from '../../stores/usageStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
-import { Checkpoint, EMPTY_MISSION, Mission, SkillItem } from '../../../shared/types';
-import { UsagePanel } from '../usage/UsagePanel';
+import { Checkpoint, EMPTY_MISSION, Mission } from '../../../shared/types';
 import { GitTab } from './GitTab';
 import { RulesPanel } from '../rules/RulesPanel';
-import { LazyPanel } from '../../components/LazyPanel';
 
-/**
- * The terminal owns xterm, which is a few hundred kilobytes of parser and
- * renderer that nobody needs until the terminal tab is opened. Importing it
- * statically here put it in the launch bundle through the side panel, which is
- * on screen from the first frame.
- */
-const TerminalPanel = React.lazy(() =>
-  import('../terminal/TerminalPanel').then((m) => ({ default: m.TerminalPanel }))
-);
-import { formatTokens, formatRelativeTime } from '../../lib/format';
+import { formatRelativeTime } from '../../lib/format';
 import { devServerUrlFromCommand, startsDevServer, isLocalUrl } from '../../lib/preview-url';
 import { insideFolder } from '../../../shared/project-paths';
 import { PREVIEW_VIEWPORTS, fitScale, presetWidth } from '../../lib/preview-viewport';
 
 export type RightPanelTab =
-  | 'queue'
   | 'mission'
   | 'changes'
-  | 'files'
-  | 'context'
-  | 'usage'
-  | 'checkpoints'
   | 'preview'
-  | 'terminal'
   | 'git'
-  | 'skills'
   | 'rules';
 
 type TabId = RightPanelTab;
@@ -86,28 +66,13 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   onTabChange
 }) => {
   const { t } = useTranslation();
-  const [localTab, setLocalTab] = useState<TabId>('queue');
+  const [localTab, setLocalTab] = useState<TabId>('preview');
   const activeTab = controlledTab ?? localTab;
   const setActiveTab = (tab: TabId) => {
     setLocalTab(tab);
     onTabChange?.(tab);
   };
   const { changes, activeDiffFile, setActiveDiff, revertChange, clearChanges } = useChangesStore();
-  const {
-    items: queueItems,
-    removeItem,
-    runNext,
-    addItem,
-    moveItem,
-    updateItem,
-    pauseAll,
-    resumeAll,
-    markDone,
-    retryItem,
-    runItem,
-    autoRun,
-    clearFinished
-  } = useQueueStore();
   const { startAgent, timeline, mode, sessionId } = useAgentStore();
   // `openFiles` is deliberately *not* subscribed to: it is read once, inside the
   // checkpoint-restore handler, and its identity changes on every keystroke.
@@ -118,13 +83,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
     fileTree: s.fileTree,
     reloadFileFromDisk: s.reloadFileFromDisk
   }));
-  const { summary, load: loadUsage } = useUsageStore();
   const { settings, providers } = useSettingsStore();
 
-  const [skills, setSkills] = useState<SkillItem[]>([]);
   const [skillsExpanded, setSkillsExpanded] = useState(false);
-  const [editingSkill, setEditingSkill] = useState<SkillItem | null>(null);
   const [checkpoints, setCheckpoints] = useState<CheckpointSummary[]>([]);
+  /** The folded checkpoint list under the change rows. Open, not gone. */
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   /**
    * The address the frame is showing — `''` until something real is found.
    *
@@ -235,10 +199,6 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
     await saveMission();
   };
 
-  const refreshSkills = () => {
-    if (window.electronAPI) window.electronAPI.listSkills(projectPath || undefined).then(setSkills).catch(console.error);
-  };
-
   const refreshCheckpoints = () => {
     if (!window.electronAPI) return;
     window.electronAPI
@@ -343,12 +303,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   };
 
   useEffect(() => {
-    refreshSkills();
-  }, [projectPath]);
-
-  useEffect(() => {
-    if (activeTab === 'checkpoints') refreshCheckpoints();
-    if (activeTab === 'usage') loadUsage();
+    if (activeTab === 'changes') refreshCheckpoints();
     if (activeTab === 'preview') void detectPreview(false);
   }, [activeTab]);
 
@@ -541,17 +496,22 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   /**
    * The tab row is written out in words, the way a workspace panel should be:
    * an icon alone cannot tell "changes" from "checkpoints" at a glance.
+   *
+   * Five, not eleven. The tabs that used to sit beside these were each the second
+   * copy of something the app already does better somewhere else — the terminal
+   * under the editor, usage in settings, the queue above the composer, files in
+   * the explorer, context in @mentions — and eleven words in a 380px panel meant
+   * a two-line strip with clipped labels. What remains is what has no other
+   * home.
+   *
+   * "Changes" carries checkpoints inside it because both answer one question —
+   * "what did the agent do to my files, and how do I undo it" — and a tab per
+   * half of a question is a tab too many.
    */
   const tabs: { id: TabId; label: string; count?: number; dot?: boolean }[] = [
-    { id: 'queue', label: t('rightSidebar.queue'), count: queueItems.length },
     { id: 'changes', label: t('rightSidebar.changes'), count: changes.length },
-    { id: 'files', label: t('rightSidebar.files'), count: referencedFiles.length },
     { id: 'preview', label: t('rightSidebar.preview'), dot: detectedUrls.length > 0 },
-    { id: 'terminal', label: t('rightSidebar.terminal') },
     { id: 'mission', label: t('rightSidebar.mission'), count: mission.objective ? 1 : 0 },
-    { id: 'context', label: t('rightSidebar.context') },
-    { id: 'usage', label: t('rightSidebar.usage') },
-    { id: 'checkpoints', label: t('rightSidebar.checkpoints') },
     { id: 'git', label: t('rightSidebar.git'), dot: gitDirty },
     { id: 'rules', label: t('rules.title') }
   ];
@@ -577,22 +537,6 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   }, [projectPath, activeTab]);
 
   const missionEnabled = !!mission.objective;
-  const visibleSkills = skillsExpanded ? skills : skills.slice(0, SKILL_CHIPS_VISIBLE);
-  const hiddenSkills = Math.max(0, skills.length - SKILL_CHIPS_VISIBLE);
-
-  const runSkill = (skill: SkillItem) => startAgent(`Execute skill: /${skill.name}\n\n${skill.content}`);
-
-  const skillChip = (skill: SkillItem) => (
-    <button
-      key={`${skill.id}-${skill.isGlobal}`}
-      onClick={() => runSkill(skill)}
-      title={skill.description || `/${skill.name}`}
-      className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-d4-surface border border-d4-border text-[11px] text-d4-muted hover:text-d4-text hover:border-d4-accent/50 transition-colors max-w-[150px]"
-    >
-      <span className="truncate">{skill.name}</span>
-    </button>
-  );
-
   return (
     <div
       className="bg-d4-panel border-l border-d4-border-subtle flex flex-col h-full select-none text-xs shrink-0"
@@ -671,250 +615,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
         </span>
       </div>
 
-      <div className={`flex-1 min-h-0 ${activeTab === 'preview' || activeTab === 'terminal' ? 'flex flex-col' : 'overflow-y-auto p-3'}`}>
-        {/* ---------------------------------------------------------- QUEUE */}
-        {activeTab === 'queue' && (
-          <div className="space-y-3">
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="d4-label">{t('rightSidebar.skills')}</span>
-                {/* One button, not two. The pencil next to this one was titled
-                    "manage skills" but did the same job as the plus — it opened
-                    a blank editor — and the skills tab behind the plus already
-                    has its own add. Two doors to one room is just clutter. */}
-                <button
-                  onClick={() => setActiveTab('skills')}
-                  title={t('rightSidebar.addSkill')}
-                  className="text-d4-dimmed hover:text-d4-text"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              {skills.length === 0 ? (
-                <p className="text-[11px] text-d4-dimmed leading-relaxed">{t('rightSidebar.noSkills')}</p>
-              ) : (
-                <div className="flex flex-wrap gap-1">
-                  {visibleSkills.map(skillChip)}
-                  {hiddenSkills > 0 && (
-                    <button
-                      onClick={() => setSkillsExpanded((open) => !open)}
-                      className="px-2 py-0.5 rounded-full bg-d4-surface border border-d4-border text-[11px] text-d4-dimmed hover:text-d4-text transition-colors"
-                    >
-                      {skillsExpanded ? <ChevronUp className="w-3 h-3" /> : `${hiddenSkills} ⌄`}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <button
-                  onClick={() => setQueueOpen((open) => !open)}
-                  className="flex items-center gap-1 d4-label hover:text-d4-muted"
-                >
-                  <span>{t('rightSidebar.queue')}</span>
-                  <ChevronDown className={`w-3 h-3 transition-transform ${queueOpen ? '' : '-rotate-90'}`} />
-                </button>
-                <div className="flex items-center gap-1.5 normal-case text-[10px]">
-                  {queueItems.length > 0 && (
-                    <button onClick={runNext} className="flex items-center gap-1 text-d4-accent hover:underline">
-                      <Play className="w-3 h-3" />
-                      <span>{t('rightSidebar.runNext')}</span>
-                    </button>
-                  )}
-                  <button
-                    onClick={() => (autoRun ? pauseAll() : resumeAll())}
-                    title={autoRun ? t('rightSidebar.pauseQueue') : t('rightSidebar.resumeQueue')}
-                    className={`p-0.5 ${autoRun ? 'text-d4-dimmed hover:text-d4-text' : 'text-d4-warning'}`}
-                  >
-                    {autoRun ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
-                  </button>
-                  <button
-                    onClick={clearFinished}
-                    title={t('rightSidebar.clearFinished')}
-                    className="p-0.5 text-d4-dimmed hover:text-d4-text"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-
-              {queueOpen && (
-                <div className="space-y-2">
-                  <div className="flex items-center space-x-1.5">
-                    <input
-                      value={queueInput}
-                      onChange={(e) => setQueueInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && queueInput.trim()) {
-                          addItem(queueInput.trim(), mode);
-                          setQueueInput('');
-                        }
-                      }}
-                      placeholder={t('rightSidebar.queuePlaceholder')}
-                      className="flex-1 bg-d4-surface border border-d4-border rounded-md px-2 py-1.5 text-[11px] text-d4-text outline-none focus:border-d4-accent"
-                    />
-                    <button
-                      onClick={() => {
-                        if (queueInput.trim()) {
-                          addItem(queueInput.trim(), mode);
-                          setQueueInput('');
-                        }
-                      }}
-                      className="p-1.5 bg-d4-surface border border-d4-border rounded-md text-d4-muted hover:text-d4-text"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-
-                  {!autoRun && (
-                    <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-d4-warning/10 border border-d4-warning/30 text-[10px] text-d4-warning">
-                      <Pause className="w-3 h-3" />
-                      <span>{t('rightSidebar.queuePaused')}</span>
-                    </div>
-                  )}
-
-                  {queueItems.length === 0 ? (
-                    <p className="text-[11px] text-d4-dimmed">{t('rightSidebar.emptyQueue')}</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {queueItems.map((item, idx) => (
-                        <div
-                          key={item.id}
-                          className={`bg-d4-surface border rounded-md p-2.5 space-y-1.5 ${
-                            item.status === 'running' ? 'border-d4-accent/60' : 'border-d4-border'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="font-mono text-[10px] text-d4-dimmed">#{idx + 1}</span>
-                            <div className="flex items-center space-x-1">
-                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-d4-panel border border-d4-border uppercase text-d4-accent font-medium">
-                                {item.mode}
-                              </span>
-                              <span
-                                className={`px-1.5 py-0.5 rounded text-[10px] border ${
-                                  item.status === 'running'
-                                    ? 'border-d4-accent/40 text-d4-accent'
-                                    : item.status === 'failed'
-                                      ? 'border-d4-error/40 text-d4-error'
-                                      : 'border-d4-border text-d4-dimmed'
-                                }`}
-                              >
-                                {t(`rightSidebar.status_${item.status}`, { defaultValue: item.status })}
-                              </span>
-                            </div>
-                          </div>
-
-                          {editingQueueId === item.id ? (
-                            <div className="space-y-1.5">
-                              <textarea
-                                value={editingQueueText}
-                                onChange={(e) => setEditingQueueText(e.target.value)}
-                                rows={3}
-                                className="w-full bg-d4-bg border border-d4-border rounded px-2 py-1.5 text-[11px] text-d4-text outline-none focus:border-d4-accent resize-none"
-                              />
-                              <div className="flex items-center justify-end gap-1.5">
-                                <button
-                                  onClick={() => setEditingQueueId(null)}
-                                  className="px-2 py-0.5 text-[10px] text-d4-dimmed hover:text-d4-text"
-                                >
-                                  {t('common.cancel')}
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    if (editingQueueText.trim()) updateItem(item.id, { prompt: editingQueueText.trim() });
-                                    setEditingQueueId(null);
-                                  }}
-                                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-d4-accent text-black text-[10px] font-medium"
-                                >
-                                  <Check className="w-3 h-3" />
-                                  {t('common.save')}
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <p className="text-d4-text text-xs leading-snug whitespace-pre-wrap line-clamp-3">
-                              {item.prompt}
-                            </p>
-                          )}
-
-                          {item.error && <p className="text-[10px] text-d4-error line-clamp-2">{item.error}</p>}
-
-                          <div className="flex items-center justify-between pt-1 border-t border-d4-border-subtle">
-                            <div className="flex items-center gap-0.5">
-                              <button
-                                onClick={() => moveItem(item.id, -1)}
-                                disabled={idx === 0}
-                                title={t('rightSidebar.moveUp')}
-                                className="p-0.5 text-d4-dimmed hover:text-d4-text disabled:opacity-30"
-                              >
-                                <ChevronUp className="w-3 h-3" />
-                              </button>
-                              <button
-                                onClick={() => moveItem(item.id, 1)}
-                                disabled={idx === queueItems.length - 1}
-                                title={t('rightSidebar.moveDown')}
-                                className="p-0.5 text-d4-dimmed hover:text-d4-text disabled:opacity-30"
-                              >
-                                <ChevronDown className="w-3 h-3" />
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setEditingQueueId(item.id);
-                                  setEditingQueueText(item.prompt);
-                                }}
-                                title={t('common.edit')}
-                                className="p-0.5 text-d4-dimmed hover:text-d4-text"
-                              >
-                                <Pencil className="w-3 h-3" />
-                              </button>
-                            </div>
-
-                            <div className="flex items-center gap-1.5 text-[10px]">
-                              {(item.status === 'failed' || item.status === 'cancelled') && (
-                                <button
-                                  onClick={() => retryItem(item.id)}
-                                  className="flex items-center gap-1 text-d4-warning hover:underline"
-                                >
-                                  <RotateCcw className="w-3 h-3" />
-                                  {t('rightSidebar.retry')}
-                                </button>
-                              )}
-                              {item.status === 'queued' && (
-                                <button onClick={() => runItem(item.id)} className="text-d4-accent hover:underline">
-                                  {t('rightSidebar.runNow')}
-                                </button>
-                              )}
-                              {item.status === 'running' ? (
-                                <button onClick={() => markDone(item.id)} className="text-d4-success hover:underline">
-                                  {t('rightSidebar.markDone')}
-                                </button>
-                              ) : (
-                                <button
-                                  onClick={() => markDone(item.id)}
-                                  className="text-d4-dimmed hover:text-d4-success"
-                                  title={t('rightSidebar.markDone')}
-                                >
-                                  <Check className="w-3 h-3" />
-                                </button>
-                              )}
-                              <button onClick={() => removeItem(item.id)} className="p-0.5 text-d4-dimmed hover:text-d4-error">
-                                <Trash2 className="w-3 h-3" />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
+      <div className={`flex-1 min-h-0 ${activeTab === 'preview' ? 'flex flex-col' : 'overflow-y-auto p-3'}`}>
         {/* -------------------------------------------------------- MISSION */}
         {activeTab === 'mission' && (
           <div className="space-y-3">
@@ -1068,147 +769,96 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                 ))}
               </div>
             )}
-          </div>
-        )}
 
-        {/* ---------------------------------------------------------- FILES */}
-        {activeTab === 'files' && (
-          <div className="space-y-3">
-            <div className="text-d4-dimmed text-[11px] uppercase font-semibold">
-              {t('rightSidebar.files')} ({referencedFiles.length})
-            </div>
-            {referencedFiles.length === 0 ? (
-              <p className="text-[11px] text-d4-dimmed py-2">{t('rightSidebar.noFiles')}</p>
-            ) : (
-              <div className="space-y-1">
-                {referencedFiles.map((file) => (
-                  <div
-                    key={file}
-                    className="p-2 bg-d4-surface border border-d4-border rounded font-mono text-[11px] text-d4-text truncate"
-                  >
-                    {file}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* -------------------------------------------------------- CONTEXT */}
-        {activeTab === 'context' && (
-          <div className="space-y-3">
-            <div className="text-d4-dimmed text-[11px] uppercase font-semibold">{t('rightSidebar.context')}</div>
-            <div className="bg-d4-surface border border-d4-border rounded p-3 space-y-2">
-              <div className="flex justify-between text-xs">
-                <span className="text-d4-muted">{t('rightSidebar.estimatedContext')}</span>
-                <span className="text-d4-accent font-mono font-medium">
-                  ~{formatTokens(contextBreakdown.conversationTokens)}
-                  {activeModelContext ? ` / ${formatTokens(activeModelContext)}` : ''}
-                </span>
-              </div>
-              <div className="w-full bg-d4-subtle h-1.5 rounded-full overflow-hidden">
-                <div
-                  className="bg-d4-accent h-full"
-                  style={{
-                    width: `${
-                      activeModelContext
-                        ? Math.min((contextBreakdown.conversationTokens / activeModelContext) * 100, 100)
-                        : 10
-                    }%`
-                  }}
+            {/* Checkpoints live here, not in a tab of their own. The list answers
+                the same question the rows above do — how do I undo the agent —
+                just further back: a file row restores one edit, a checkpoint
+                restores a moment. Folded until asked for, so the common case
+                (scanning what changed) is not buried under history. */}
+            <div className="border-t border-d4-border-subtle pt-2">
+              <button
+                onClick={() => setCheckpointsOpen((open) => !open)}
+                className="flex items-center gap-1.5 text-d4-dimmed text-[11px] uppercase font-semibold hover:text-d4-text w-full"
+              >
+                <ChevronDown
+                  className={`w-3 h-3 transition-transform ${checkpointsOpen ? '' : '-rotate-90'}`}
                 />
-              </div>
-            </div>
-
-            <div className="space-y-1.5 text-xs text-d4-muted">
-              <div className="flex justify-between py-1 border-b border-d4-border/40">
-                <span>{t('rightSidebar.contextToolResults')}</span>
-                <span className="font-mono text-d4-dimmed">~{formatTokens(contextBreakdown.fileTokens)}</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-d4-border/40">
-                <span>{t('rightSidebar.contextConversation')}</span>
-                <span className="font-mono text-d4-dimmed">~{formatTokens(contextBreakdown.conversationTokens)}</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-d4-border/40">
-                <span>{t('rightSidebar.contextProjectFiles')}</span>
-                <span className="font-mono text-d4-dimmed">{fileTree?.children?.length ?? 0}</span>
-              </div>
-            </div>
-            <p className="text-[10px] text-d4-dimmed leading-relaxed">{t('rightSidebar.contextNote')}</p>
-          </div>
-        )}
-
-        {/* ---------------------------------------------------------- USAGE */}
-        {activeTab === 'usage' && <UsagePanel />}
-
-        {/* ---------------------------------------------------- CHECKPOINTS */}
-        {activeTab === 'checkpoints' && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-d4-dimmed text-[11px] uppercase font-semibold">
-              <span>{t('rightSidebar.checkpoints')}</span>
-              <button onClick={refreshCheckpoints} className="text-d4-dimmed hover:text-d4-text" title={t('usage.refresh')}>
-                <RefreshCw className="w-3 h-3" />
+                {t('rightSidebar.checkpoints')}
+                {checkpoints.length > 0 && (
+                  <span className="text-[10px] font-mono normal-case">{checkpoints.length}</span>
+                )}
+                <span
+                  className="flex-1"
+                  title={t('usage.refresh')}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    refreshCheckpoints();
+                  }}
+                >
+                  <RefreshCw className="w-3 h-3" />
+                </span>
               </button>
-            </div>
 
-            {checkpoints.length === 0 ? (
-              <p className="text-[11px] text-d4-dimmed py-2">{t('rightSidebar.noCheckpoints')}</p>
-            ) : (
-              <div className="space-y-2">
-                {checkpoints.map((cp) => (
-                  <div key={cp.id} className="bg-d4-surface border border-d4-border rounded p-2.5 space-y-1.5">
-                    <div className="text-[11px] text-d4-text leading-snug line-clamp-2">{cp.description}</div>
-                    <div className="flex items-center justify-between text-[10px] text-d4-dimmed">
-                      <span>{formatRelativeTime(cp.timestamp)}</span>
-                      <span className="font-mono">{cp.fileCount} files</span>
-                    </div>
-                    <div className="flex items-center space-x-2 pt-1 border-t border-d4-border/40">
-                      <button
-                        disabled={cp.fileCount === 0}
-                        onClick={async () => {
-                          if (!window.electronAPI) return;
-                          const res = await window.electronAPI.restoreCheckpoint(cp.id, projectPath ?? undefined);
-                          if (res.success) {
-                            toast.success(t('rightSidebar.restored', { count: res.restored ?? 0 }));
-                            // Anything skipped is a file the user expects back — say so.
-                            if (res.refused?.length) {
-                              toast.warning(
-                                t('rightSidebar.restorePartial'),
-                                t('rightSidebar.restoreSkipped', { count: res.refused.length })
-                              );
-                            }
-                            // Re-read from disk so the editor shows what was restored.
-                            // Only touched files are reopened; re-reading everything
-                            // would discard unrelated unsaved edits.
-                            const restoredPaths = new Set((cp.files ?? []).map((f) => f.path));
-                            for (const open of useProjectStore.getState().openFiles) {
-                              if (restoredPaths.has(open.path)) await reloadFileFromDisk(open.path);
-                            }
-                          } else {
-                            toast.error(t('rightSidebar.restoreFailed'), res.error);
-                          }
-                        }}
-                        className="flex items-center space-x-1 text-d4-accent disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        <RotateCcw className="w-3 h-3" />
-                        <span>{t('rightSidebar.restore')}</span>
-                      </button>
-                      <button
-                        onClick={async () => {
-                          if (!window.electronAPI) return;
-                          await window.electronAPI.deleteCheckpoint(cp.id);
-                          refreshCheckpoints();
-                        }}
-                        className="flex items-center space-x-1 text-red-400/80 hover:text-red-400 ml-auto"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                        <span>{t('common.delete')}</span>
-                      </button>
-                    </div>
+              {checkpointsOpen &&
+                (checkpoints.length === 0 ? (
+                  <p className="text-[11px] text-d4-dimmed py-2">{t('rightSidebar.noCheckpoints')}</p>
+                ) : (
+                  <div className="space-y-2 mt-2">
+                    {checkpoints.map((cp) => (
+                      <div key={cp.id} className="bg-d4-surface border border-d4-border rounded p-2.5 space-y-1.5">
+                        <div className="text-[11px] text-d4-text leading-snug line-clamp-2">{cp.description}</div>
+                        <div className="flex items-center justify-between text-[10px] text-d4-dimmed">
+                          <span>{formatRelativeTime(cp.timestamp)}</span>
+                          <span className="font-mono">{cp.fileCount} files</span>
+                        </div>
+                        <div className="flex items-center space-x-2 pt-1 border-t border-d4-border/40">
+                          <button
+                            disabled={cp.fileCount === 0}
+                            onClick={async () => {
+                              if (!window.electronAPI) return;
+                              const res = await window.electronAPI.restoreCheckpoint(cp.id, projectPath ?? undefined);
+                              if (res.success) {
+                                toast.success(t('rightSidebar.restored', { count: res.restored ?? 0 }));
+                                // Anything skipped is a file the user expects back — say so.
+                                if (res.refused?.length) {
+                                  toast.warning(
+                                    t('rightSidebar.restorePartial'),
+                                    t('rightSidebar.restoreSkipped', { count: res.refused.length })
+                                  );
+                                }
+                                // Re-read from disk so the editor shows what was restored.
+                                // Only touched files are reopened; re-reading everything
+                                // would discard unrelated unsaved edits.
+                                const restoredPaths = new Set((cp.files ?? []).map((f) => f.path));
+                                for (const open of useProjectStore.getState().openFiles) {
+                                  if (restoredPaths.has(open.path)) await reloadFileFromDisk(open.path);
+                                }
+                              } else {
+                                toast.error(t('rightSidebar.restoreFailed'), res.error);
+                              }
+                            }}
+                            className="flex items-center space-x-1 text-d4-accent disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>{t('rightSidebar.restore')}</span>
+                          </button>
+                          <button
+                            onClick={async () => {
+                              if (!window.electronAPI) return;
+                              await window.electronAPI.deleteCheckpoint(cp.id);
+                              refreshCheckpoints();
+                            }}
+                            className="flex items-center space-x-1 text-red-400/80 hover:text-red-400 ml-auto"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>{t('common.delete')}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 ))}
-              </div>
-            )}
+            </div>
           </div>
         )}
 
@@ -1457,131 +1107,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
           </div>
         )}
 
-        {/* ------------------------------------------------------- TERMINAL */}
-        {activeTab === 'terminal' && (
-          <LazyPanel label={t('terminal.loading')}>
-            <TerminalPanel variant="fill" />
-          </LazyPanel>
-        )}
-
         {/* ------------------------------------------------------------- GIT */}
         {activeTab === 'git' && <GitTab />}
 
         {/* ---------------------------------------------------------- RULES */}
         {activeTab === 'rules' && <RulesPanel projectPath={projectPath} />}
 
-        {/* --------------------------------------------------------- SKILLS */}
-        {activeTab === 'skills' && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-d4-dimmed text-[11px] uppercase font-semibold">
-              <span>{t('rightSidebar.skills')}</span>
-              <button
-                onClick={() =>
-                  setEditingSkill({
-                    id: `skill-${Date.now().toString(36)}`,
-                    name: 'new-skill',
-                    description: '',
-                    content: '# New Skill\n\nDescribe what the agent should do.\n',
-                    isGlobal: false
-                  })
-                }
-                className="flex items-center space-x-1 text-d4-accent hover:underline normal-case"
-              >
-                <Plus className="w-3 h-3" />
-                <span>{t('rightSidebar.addSkill')}</span>
-              </button>
-            </div>
-
-            {editingSkill && (
-              <div className="bg-d4-surface border border-d4-accent/50 rounded p-2.5 space-y-2">
-                <div className="flex items-center space-x-1.5">
-                  <input
-                    value={editingSkill.id}
-                    onChange={(e) => setEditingSkill({ ...editingSkill, id: e.target.value, name: e.target.value })}
-                    className="flex-1 bg-d4-panel border border-d4-border rounded px-2 py-1 text-[11px] font-mono text-d4-text outline-none"
-                    placeholder="skill-name"
-                  />
-                  <button onClick={() => setEditingSkill(null)} className="p-1 text-d4-dimmed hover:text-d4-text">
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <input
-                  value={editingSkill.description}
-                  onChange={(e) => setEditingSkill({ ...editingSkill, description: e.target.value })}
-                  className="w-full bg-d4-panel border border-d4-border rounded px-2 py-1 text-[11px] text-d4-text outline-none"
-                  placeholder={t('rightSidebar.skillDescription')}
-                />
-                <textarea
-                  value={editingSkill.content}
-                  onChange={(e) => setEditingSkill({ ...editingSkill, content: e.target.value })}
-                  rows={8}
-                  className="w-full bg-d4-panel border border-d4-border rounded px-2 py-1.5 text-[11px] text-d4-text outline-none font-mono resize-none"
-                />
-                <button
-                  onClick={async () => {
-                    if (!window.electronAPI || !editingSkill.id.trim()) return;
-                    const res = await window.electronAPI.saveSkill(editingSkill, projectPath || undefined);
-                    if (res.success) {
-                      toast.success(t('rightSidebar.skillSaved'));
-                      setEditingSkill(null);
-                      refreshSkills();
-                    } else {
-                      toast.error(t('rightSidebar.skillSaveFailed'), res.error);
-                    }
-                  }}
-                  className="flex items-center space-x-1 px-2.5 py-1 bg-d4-accent text-black font-semibold rounded text-[11px]"
-                >
-                  <Save className="w-3 h-3" />
-                  <span>{t('common.save')}</span>
-                </button>
-              </div>
-            )}
-
-            <div className="space-y-2">
-              {skills.length === 0 && !editingSkill && (
-                <p className="text-[11px] text-d4-dimmed leading-relaxed">{t('rightSidebar.noSkills')}</p>
-              )}
-              {skills.map((skill) => (
-                <div key={`${skill.id}-${skill.isGlobal}`} className="bg-d4-surface border border-d4-border rounded p-2.5">
-                  <div className="flex items-center justify-between mb-1">
-                    <button
-                      onClick={() => runSkill(skill)}
-                      className="font-semibold text-d4-accent text-xs hover:underline"
-                    >
-                      /{skill.name}
-                    </button>
-                    <div className="flex items-center space-x-1.5">
-                      <span className="text-[10px] text-d4-dimmed">
-                        {skill.isGlobal ? t('rightSidebar.skillGlobal') : t('rightSidebar.skillProject')}
-                      </span>
-                      {!skill.isGlobal && (
-                        <>
-                          <button
-                            onClick={() => setEditingSkill(skill)}
-                            className="text-[10px] text-d4-dimmed hover:text-d4-text"
-                          >
-                            {t('common.edit')}
-                          </button>
-                          <button
-                            onClick={async () => {
-                              if (!window.electronAPI) return;
-                              await window.electronAPI.deleteSkill(skill.id, projectPath || undefined);
-                              refreshSkills();
-                            }}
-                            className="text-d4-dimmed hover:text-red-400"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  <p className="text-d4-muted text-[11px] leading-relaxed">{skill.description}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

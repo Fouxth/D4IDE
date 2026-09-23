@@ -31,6 +31,7 @@ import {
   questionCardTitle
 } from '../../../shared/questions';
 import { IPC_CHANNELS } from '../../../shared/ipc-events';
+import { parseAssignment, TEAM_ROLE_LABEL, type TeamRole } from '../../../shared/ai-team';
 import { providerManager, AutoRouteDecision } from '../providers/provider-manager';
 import { IAIProvider, classifyThrownError } from '../providers/provider-interface';
 import { toolRegistry, detectScriptCommand, hasPackageScript } from '../tools/tool-registry';
@@ -272,6 +273,23 @@ export class AgentRuntime {
     const config = providerManager.getConfig(providerId);
     if (!config || config.enabled === false) return null;
     return { providerId, modelId };
+  }
+
+  /**
+   * The model sitting in a team seat for this run, when usable.
+   *
+   * An empty seat, a malformed assignment (`parseAssignment` nulls those) or a
+   * provider that is disabled/missing all resolve to null, and the caller keeps
+   * the model the composer chose — one typo in Settings must cost a seat, not
+   * the run. The current provider/model are captured at construction time, so
+   * the seat travels with the run's own model, not whatever the settings say now.
+   */
+  private teamSeat(role: TeamRole): { providerId: string; modelId: string } | null {
+    const seat = parseAssignment(appStore.getSettings().aiTeam?.[role]);
+    if (!seat) return null;
+    const config = providerManager.getConfig(seat.providerId);
+    if (!config || config.enabled === false) return null;
+    return seat;
   }
 
   /**
@@ -1661,6 +1679,25 @@ ${tokenDisciplineRules(language)}`;
         timestamp: Date.now()
       });
 
+      // The planner seat (AI team): when filled, the plan is written by the
+      // assigned model instead of the composer's. teamSeat already validated the
+      // provider exists and is enabled; the `|| provider` is belt-and-braces so
+      // an instance that vanished mid-run degrades to the main model, not an error.
+      const plannerSeat = this.teamSeat('planner');
+      const planProvider = (plannerSeat && providerManager.getProvider(plannerSeat.providerId)) || provider;
+      if (plannerSeat && planProvider !== provider) {
+        this.sendEvent(mainWindow, {
+          id: `team_planner_${Date.now()}`,
+          type: 'thinking',
+          title: `${TEAM_ROLE_LABEL.planner[language]} · AI Team`,
+          content:
+            language === 'th'
+              ? `แผนนี้เขียนโดย ${plannerSeat.providerId}/${plannerSeat.modelId} ตามที่ตั้งค่าทีม AI ไว้`
+              : `The plan is written by ${plannerSeat.providerId}/${plannerSeat.modelId}, as configured for the AI team.`,
+          timestamp: Date.now()
+        });
+      }
+
       messages.push({
         id: `p_${Date.now()}`,
         role: 'user',
@@ -1676,7 +1713,7 @@ ${tokenDisciplineRules(language)}`;
         let planAccumulated = '';
         try {
           // The inspection loop runs read-only tools, then produces the plan text.
-          planAccumulated = await this.planToolLoop(mainWindow, provider, projectPath, messages, token);
+          planAccumulated = await this.planToolLoop(mainWindow, planProvider, projectPath, messages, token, plannerSeat);
         } catch (err: any) {
           if (this.isCancelled(token)) {
             this.sendStatus(mainWindow, 'cancelled');
@@ -1788,6 +1825,25 @@ ${tokenDisciplineRules(language)}`;
     // --- BUILD MODE LOOP ---
     // (An answer-only run comes through here too — the loop is how a reply is
     // requested — but it carries no tools, so it ends on its first round.)
+    // The executor seat (AI team): when filled, the file-editing loop runs on the
+    // assigned model. Answer-only runs keep the run's model — a greeting is not
+    // work, and the executor seat is for work.
+    const executorSeat = this.answerOnly ? null : this.teamSeat('executor');
+    const executorProvider = (executorSeat && providerManager.getProvider(executorSeat.providerId)) || provider;
+    const executorProviderId = executorSeat?.providerId ?? providerId;
+    const executorModelId = executorSeat?.modelId ?? modelId;
+    if (executorSeat && executorProvider !== provider) {
+      this.sendEvent(mainWindow, {
+        id: `team_executor_${Date.now()}`,
+        type: 'thinking',
+        title: `${TEAM_ROLE_LABEL.executor[language]} · AI Team`,
+        content:
+          language === 'th'
+            ? `การลงมือแก้ไฟล์ทำโดย ${executorSeat.providerId}/${executorSeat.modelId} ตามที่ตั้งค่าทีม AI ไว้`
+            : `File edits run on ${executorSeat.providerId}/${executorSeat.modelId}, as configured for the AI team.`,
+        timestamp: Date.now()
+      });
+    }
     this.sendStatus(mainWindow, 'running');
     let stepCount = 0;
     // Cheaper mode means fewer steps, not just a politer prompt.
@@ -1859,11 +1915,11 @@ ${tokenDisciplineRules(language)}`;
       try {
         await this.runProviderCall(
           mainWindow,
-          provider,
-          providerId,
-          modelId,
+          executorProvider,
+          executorProviderId,
+          executorModelId,
           {
-            model: modelId,
+            model: executorModelId,
             messages,
             tools: this.toolDefinitionsFor('build'),
             reasoningEffort: settings.reasoningEffort,
@@ -2537,16 +2593,30 @@ ${tokenDisciplineRules(language)}`;
     const settings = appStore.getSettings();
     const language = settings.language;
 
-    // A read-only subagent reads files and reports — the cheapest useful model
-    // can do that, and it runs several times per delegation. A write-capable one
-    // keeps the model the user chose: quality of the code matters more than the
-    // saving. When no cheap model is configured, nothing changes.
-    const cheap = settings.cheaperModelForSmallTasks && !definition.writeCapable ? this.cheapModel() : null;
-    const subagentProviderId = cheap?.providerId ?? this.currentProviderId;
-    const subagentModelId = cheap?.modelId ?? this.currentModelId;
+    // A read-only subagent reads files and reports — the analyst seat (AI team)
+    // is the explicit choice for exactly this work and outranks it; the cheaper-
+    // model toggle is the economy fallback when no seat is assigned. A write-
+    // capable one keeps the model the user chose: quality of the code matters
+    // more than the saving. When neither is configured, nothing changes.
+    const analystSeat = !definition.writeCapable ? this.teamSeat('analyst') : null;
+    const cheap = !analystSeat && settings.cheaperModelForSmallTasks && !definition.writeCapable ? this.cheapModel() : null;
+    const seat = analystSeat ?? cheap;
+    const subagentProviderId = seat?.providerId ?? this.currentProviderId;
+    const subagentModelId = seat?.modelId ?? this.currentModelId;
     const provider = providerManager.getProvider(subagentProviderId);
     if (!provider) throw new Error('The provider for this run is no longer available — start the task again.');
-    if (cheap) {
+    if (analystSeat) {
+      this.sendEvent(mainWindow, {
+        id: `team_analyst_${Date.now()}`,
+        type: 'thinking',
+        title: `${TEAM_ROLE_LABEL.analyst[language]} · AI Team`,
+        content:
+          language === 'th'
+            ? `${definition.label} สำรวจและรายงานโดย ${analystSeat.providerId}/${analystSeat.modelId} ตามที่ตั้งค่าทีม AI ไว้`
+            : `${definition.label} surveys and reports on ${analystSeat.providerId}/${analystSeat.modelId}, as configured for the AI team.`,
+        timestamp: Date.now()
+      });
+    } else if (cheap) {
       this.sendEvent(mainWindow, {
         id: `sub_cheap_${Date.now()}`,
         type: 'thinking',
@@ -2911,8 +2981,12 @@ Writing files is still forbidden in this mode.`;
     provider: IAIProvider,
     projectPath: string,
     messages: ChatMessage[],
-    token: number
+    token: number,
+    /** AI team: the planner seat; absent/null keeps the run's own model. */
+    plannerSeat?: { providerId: string; modelId: string } | null
   ): Promise<string> {
+    const plannerProviderId = plannerSeat?.providerId ?? this.currentProviderId;
+    const plannerModelId = plannerSeat?.modelId ?? this.currentModelId;
     const settings = appStore.getSettings();
     const language: 'th' | 'en' = settings.language === 'en' ? 'en' : 'th';
     let accumulated = '';
@@ -2929,10 +3003,11 @@ Writing files is still forbidden in this mode.`;
       await this.runProviderCall(
         mainWindow,
         provider,
-        this.currentProviderId,
-        this.currentModelId,
+        // AI team: the planner seat when assigned, otherwise the run's own.
+        plannerProviderId,
+        plannerModelId,
         {
-          model: this.currentModelId,
+          model: plannerModelId,
           messages,
           tools: this.toolDefinitionsFor('plan'),
           reasoningEffort: settings.reasoningEffort,

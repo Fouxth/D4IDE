@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, Download, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useUsageStore } from '../../stores/usageStore';
@@ -6,6 +6,19 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
 import { formatTokens, formatUsd, formatRelativeTime, formatDuration } from '../../lib/format';
 import { UsageBucket } from '../../../shared/types';
+import {
+  auditTeamSeats,
+  buildTeamFromPreset,
+  isTeamConfigured,
+  TEAM_PRESETS,
+  TEAM_ROLES,
+  TEAM_ROLE_LABEL,
+  TEAM_ROLE_DESC,
+  parseAssignment,
+  type SeatCandidate,
+  type TeamPresetId,
+  type TeamRole
+} from '../../../shared/ai-team';
 import { RunReports } from './RunReports';
 
 const BucketTable: React.FC<{ title: string; buckets: UsageBucket[] }> = ({ title, buckets }) => {
@@ -50,16 +63,53 @@ export const UsageDashboard: React.FC<{
 }> = ({ embedded }) => {
   const { t } = useTranslation();
   const { summary, load, reset, isLoading } = useUsageStore();
-  const { settings, updateSettings } = useSettingsStore();
+  const { settings, updateSettings, providers } = useSettingsStore();
   const [exporting, setExporting] = useState(false);
+  // Team-seat labels follow the app language, not the browser.
+  const lang: 'th' | 'en' = settings?.language === 'en' ? 'en' : 'th';
 
   useEffect(() => {
     load();
   }, [load]);
 
+  /** Every model the user's *enabled* providers expose — the pool a preset may fill seats from. */
+  const seatCandidates = useMemo<SeatCandidate[]>(
+    () =>
+      providers
+        .filter((provider) => provider.enabled)
+        .flatMap((provider) => provider.models.map((model) => ({ providerId: provider.id, modelId: model.id, model }))),
+    [providers]
+  );
+
+  /** Stale-seat audit: seats pointing at disabled providers, dropped models, typos.
+   * Depends on the seat *strings*, not the settings object — some update paths
+   * (the demo bridge) mutate settings in place, and an object-identity memo
+   * would keep showing a stale audit. */
+  const aiTeam = settings?.aiTeam;
+  const seatAudit = useMemo(
+    () => auditTeamSeats(aiTeam, providers),
+    [aiTeam?.planner, aiTeam?.analyst, aiTeam?.executor, providers]
+  );
+
   if (!summary || !settings) {
     return <div className="text-center py-10 text-d4-dimmed text-xs">{t('usage.loading')}</div>;
   }
+
+  const applyPreset = (preset: TeamPresetId) => {
+    const team = buildTeamFromPreset(preset, seatCandidates);
+    if (!team) {
+      toast.info(t('usage.aiTeamNoCandidates'));
+      return;
+    }
+    updateSettings({ aiTeam: team });
+    if (isTeamConfigured(team)) toast.success(t('usage.aiTeamApplied'));
+  };
+
+  const applySuggestion = (role: TeamRole, suggestion: { providerId: string; modelId: string }) => {
+    const current = settings?.aiTeam ?? { planner: '', analyst: '', executor: '' };
+    updateSettings({ aiTeam: { ...current, [role]: `${suggestion.providerId}:${suggestion.modelId}` } });
+    toast.success(t('usage.aiTeamApplied'));
+  };
 
   const totals = [
     { label: t('usage.today'), value: summary.today },
@@ -207,6 +257,92 @@ export const UsageDashboard: React.FC<{
           placeholder={t('usage.cheapModelPlaceholder')}
           className="w-full bg-d4-panel border border-d4-border rounded px-2 py-1.5 text-xs font-mono text-d4-text outline-none focus:border-d4-accent"
         />
+      </div>
+
+      {/* The AI team: one job, three seats. A seat left empty keeps the main
+          model, so the whole card is inert until someone types in it. */}
+      <div className="bg-d4-surface border border-d4-border rounded-md p-3 space-y-3">
+        <div className="text-[11px] uppercase font-semibold text-d4-dimmed">{t('usage.aiTeam')}</div>
+        <p className="text-[11px] text-d4-dimmed leading-relaxed">{t('usage.aiTeamHint')}</p>
+
+        {/* Presets: one click, all three seats. The picker reads the user's own
+            provider catalogue, so a preset can only ever fill seats the user
+            actually has — and with no tool-capable model, there is nothing
+            honest to fill in, so the row goes inert instead of guessing. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] uppercase text-d4-dimmed mr-0.5">{t('usage.aiTeamPresets')}</span>
+          {TEAM_PRESETS.map((preset) => {
+            const isClear = preset === 'clear';
+            const disabled = !isClear && seatCandidates.length === 0;
+            return (
+              <button
+                key={preset}
+                type="button"
+                disabled={disabled}
+                title={t(`usage.aiTeamPreset${preset[0].toUpperCase()}${preset.slice(1)}Desc`)}
+                onClick={() => applyPreset(preset)}
+                className={`px-2 py-0.5 rounded-full border text-[11px] transition-colors ${
+                  isClear
+                    ? 'border-d4-border text-d4-dimmed hover:text-d4-text hover:border-d4-dimmed'
+                    : 'border-d4-accent/40 text-d4-accent hover:bg-d4-accent/10'
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+              >
+                {t(`usage.aiTeamPreset${preset[0].toUpperCase()}${preset.slice(1)}`)}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="space-y-2">
+          {TEAM_ROLES.map((role) => {
+            const value = settings.aiTeam?.[role] ?? '';
+            const issue = seatAudit.find((i) => i.role === role);
+            const invalid = issue && issue.kind !== 'empty' && issue.kind !== 'ok';
+            return (
+              <div key={role} className="grid grid-cols-[110px_1fr] gap-2 items-center">
+                <div title={TEAM_ROLE_DESC[role][lang]} className="text-[11px] text-d4-muted truncate">
+                  {TEAM_ROLE_LABEL[role][lang]}
+                </div>
+                <div className="space-y-1">
+                  <input
+                    type="text"
+                    value={value}
+                    onChange={(e) =>
+                      updateSettings({ aiTeam: { ...(settings.aiTeam ?? { planner: '', analyst: '', executor: '' }), [role]: e.target.value } })
+                    }
+                    placeholder={t('usage.aiTeamPlaceholder')}
+                    className={`w-full bg-d4-panel border rounded px-2 py-1.5 text-xs font-mono text-d4-text outline-none ${
+                      invalid ? 'border-red-500/70 focus:border-red-500' : 'border-d4-border focus:border-d4-accent'
+                    }`}
+                  />
+                  {issue && invalid && (
+                    <div className="flex items-center gap-1.5 text-[10px] text-amber-400/90">
+                      <span className="min-w-0 truncate">
+                        {issue.suggestion
+                          ? t(`usage.aiTeamIssue${issue.kind[0].toUpperCase()}${issue.kind.slice(1)}`, { seat: issue.value })
+                          : t('usage.aiTeamIssueNoFix')}
+                      </span>
+                      {issue.suggestion && (
+                        <button
+                          type="button"
+                          onClick={() => applySuggestion(role, issue.suggestion!)}
+                          title={`${issue.suggestion.providerId}:${issue.suggestion.modelId}`}
+                          className="px-1.5 py-px rounded-full border border-amber-400/40 text-amber-300 hover:bg-amber-400/10 shrink-0 transition-colors"
+                        >
+                          {t('usage.aiTeamFixTo', { model: `${issue.suggestion.providerId}:${issue.suggestion.modelId}` })}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {seatCandidates.length === 0 && (
+          <p className="text-[10px] text-amber-400/90">{t('usage.aiTeamNoCandidates')}</p>
+        )}
+        <p className="text-[10px] text-d4-dimmed">{t('usage.aiTeamFallbackNote')}</p>
       </div>
 
       <RunReports records={summary.recent} />

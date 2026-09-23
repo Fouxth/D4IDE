@@ -50,6 +50,7 @@ function settingsWith(overrides: Partial<AppSettings> = {}): AppSettings {
     runTokenBudget: 0,
     cheaperModelForSmallTasks: false,
     cheapModelId: '',
+    aiTeam: { planner: '', analyst: '', executor: '' },
     autoFallback: false,
     fallbackChain: [],
     toolTimeoutMs: 120000,

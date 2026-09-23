@@ -896,7 +896,9 @@ export const Composer: React.FC<{
                   type="button"
                   onClick={() => {
                     setShowSkillPicker(false);
-                    useUiStore.getState().showRightPanel('skills');
+                    // The sidebar's skills tab is gone — skills live in Settings
+                    // → ทักษะ now, where they can be edited rather than only run.
+                    onOpenSettings?.('skills');
                   }}
                   className="w-full text-left px-2 py-1 rounded text-[10px] text-d4-dimmed hover:text-d4-text hover:bg-d4-surface transition-colors"
                 >

@@ -38,6 +38,7 @@ const SETTINGS: AppSettings = {
   runTokenBudget: 0,
   cheaperModelForSmallTasks: false,
   cheapModelId: '',
+  aiTeam: { planner: '', analyst: '', executor: '' },
   designStyle: 'minimal',
   askDesignBeforeUiWork: true,
   projectMemoryEnabled: true,
