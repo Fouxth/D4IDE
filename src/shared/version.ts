@@ -7,7 +7,7 @@
  * client better than an anonymous one. `tests/version.test.ts` keeps it in step
  * with `package.json` so the two cannot drift.
  */
-export const APP_VERSION = '1.1.3';
+export const APP_VERSION = '1.1.4';
 
 export const USER_AGENT = `D4IDE/${APP_VERSION}`;
 

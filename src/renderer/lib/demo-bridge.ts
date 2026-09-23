@@ -374,6 +374,9 @@ const EXPLICIT: Record<string, (...args: any[]) => any> = {
   onFileChanged: unsubscribe,
   onTerminalData: unsubscribe,
   onUpdateStatus: unsubscribe,
+  // The demo pretends no local runtime is listening, so the nudge stays quiet.
+  onLocalLlmFound: unsubscribe,
+  enableLocalLlm: async () => ({ settings: SETTINGS, providers: PROVIDERS }),
   onAuthPrompt: unsubscribe,
   // The demo bridge is for looking at screens, so it reports a signed-in user
   // rather than showing the lock screen with no way past it.

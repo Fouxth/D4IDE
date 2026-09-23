@@ -407,6 +407,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
 
   ipcMain.handle(IPC_CHANNELS.PROVIDERS_TEST_ALL, () => providerManager.testAll());
 
+  // The one-click "yes" behind the local-LLM nudge: flip the same switch the
+  // composer's local toggle flips (the renderer writes it through the ordinary
+  // settings update), then test Ollama immediately so the card turns green and
+  // its models land in the picker without a second round-trip.
+  ipcMain.handle(IPC_CHANNELS.LOCAL_LLM_ENABLE, async () => {
+    appStore.saveSettings({ localProvidersEnabled: true });
+    const ollama = appStore.getSanitizedProviders().find((p) => p.type === 'ollama');
+    if (ollama) await providerManager.testConnection(ollama.id);
+    return { settings: appStore.getSettings(), providers: appStore.getSanitizedProviders() };
+  });
+
   // The renderer can ask for a health verdict right now (opening the hub, or
   // the user pressing "check again" on the warning) — the answer is the same
   // push event the scheduler sends, fallback search included, so the UI has

@@ -622,6 +622,8 @@ export interface AppSettings {
    * uses neither still got both cards. Turning it on discovers their models.
    */
   localProvidersEnabled?: boolean;
+  /** When the user answered "not now" to the one-time local-LLM nudge — it never asks again. */
+  localLlmPromptDismissedAt?: number;
   firstRunComplete: boolean;
   /** Built-in providers the user removed — they must not come back on restart. */
   removedProviderIds: string[];

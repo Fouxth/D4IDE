@@ -76,6 +76,10 @@ export const IPC_CHANNELS = {
    */
   PROVIDER_HEALTH_STATUS: 'providers:health-status',
   PROVIDER_HEALTH_PROBE: 'providers:health-probe',
+  /** Main → renderer: a local LLM runtime answered on this machine (one-time nudge). */
+  LOCAL_LLM_FOUND: 'providers:local-llm-found',
+  /** Renderer → main: the user accepted the nudge — enable local providers and probe. */
+  LOCAL_LLM_ENABLE: 'providers:local-llm-enable',
   PROVIDERS_REFRESH_MODELS: 'providers:refresh-models',
   PROVIDERS_SET_KEY: 'providers:set-key',
   PROVIDERS_DELETE: 'providers:delete',

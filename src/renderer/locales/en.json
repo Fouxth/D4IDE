@@ -1,4 +1,14 @@
 {
+  "localLlm": {
+    "aria": "Local model found",
+    "title": "{{vendor}} is running on this machine",
+    "body": "{{count}} local model(s) are ready — enable them? They will be added to the model picker and the AI team automatically.",
+    "enable": "Enable",
+    "enabling": "Enabling...",
+    "notNow": "Not now",
+    "enabled": "Local models enabled",
+    "enabledDetail": "{{vendor}} models now appear in the model picker and the AI team"
+  },
   "auth": {
     "title": "Sign in to continue",
     "subtitle": "D4IDE runs only for the person signed in. Sign in with GitHub or Google — the same account is used to identify your commits.",
@@ -596,7 +606,10 @@
     "localToggle": "Look for models on this machine (Ollama / LM Studio)",
     "localToggleHint": "Off = the model menu lists only the vendors you connected with a key",
     "localToastOn": "On — local runtimes are scanned and appear in the model menu",
-    "localToastOff": "Off — the model menu lists only vendors with an API key"
+    "localToastOff": "Off — the model menu lists only vendors with an API key",
+    "localStatus": "Local LLM",
+    "localNotRunning": "Not running yet — start the app, then press “Test” to connect",
+    "localReady": "Connected — this runtime's models now appear in the model picker and the AI team"
   },
   "recovery": {
     "buffersTitle": "D4IDE recovered unsaved files",

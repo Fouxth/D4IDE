@@ -5,7 +5,9 @@ import { useUsageStore } from '../../stores/usageStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
 import { formatTokens, formatUsd, formatRelativeTime, formatDuration } from '../../lib/format';
-import { UsageBucket } from '../../../shared/types';
+import { UsageBucket, ProviderConfig } from '../../../shared/types';
+import { groupProviders, isProviderChoosable } from '../../../shared/provider-vendors';
+import { formatPrice } from '../../lib/format';
 import {
   auditTeamSeats,
   buildTeamFromPreset,
@@ -67,6 +69,16 @@ export const UsageDashboard: React.FC<{
   const [exporting, setExporting] = useState(false);
   // Team-seat labels follow the app language, not the browser.
   const lang: 'th' | 'en' = settings?.language === 'en' ? 'en' : 'th';
+  // The seat menus list exactly what the model picker lists — same
+  // choosability rule, same vendor grouping, same local-provider gate.
+  const activeIds = useMemo(() => (settings?.activeProviderId ? [settings.activeProviderId] : []), [settings?.activeProviderId]);
+  const teamVendors = useMemo(
+    () =>
+      groupProviders(providers.filter((p) => isProviderChoosable(p, activeIds, { localProvidersEnabled: settings?.localProvidersEnabled })), {
+        activeProviderIds: activeIds
+      }),
+    [providers, activeIds, settings?.localProvidersEnabled]
+  );
 
   useEffect(() => {
     load();
@@ -304,17 +316,41 @@ export const UsageDashboard: React.FC<{
                   {TEAM_ROLE_LABEL[role][lang]}
                 </div>
                 <div className="space-y-1">
-                  <input
-                    type="text"
-                    value={value}
-                    onChange={(e) =>
-                      updateSettings({ aiTeam: { ...(settings.aiTeam ?? { planner: '', analyst: '', executor: '' }), [role]: e.target.value } })
-                    }
-                    placeholder={t('usage.aiTeamPlaceholder')}
-                    className={`w-full bg-d4-panel border rounded px-2 py-1.5 text-xs font-mono text-d4-text outline-none ${
-                      invalid ? 'border-red-500/70 focus:border-red-500' : 'border-d4-border focus:border-d4-accent'
-                    }`}
-                  />
+                  <div>
+                    <select
+                      value={value}
+                      onChange={(e) =>
+                        updateSettings({ aiTeam: { ...(settings.aiTeam ?? { planner: '', analyst: '', executor: '' }), [role]: e.target.value } })
+                      }
+                      className={`w-full bg-d4-panel border rounded px-2 py-1.5 text-xs font-mono text-d4-text outline-none ${
+                        invalid ? 'border-red-500/70 focus:border-red-500' : 'border-d4-border focus:border-d4-accent'
+                      }`}
+                    >
+                      <option value="">{t('usage.aiTeamPlaceholder')}</option>
+                      {teamVendors.map((group) =>
+                        group.models.length > 0 ? (
+                          <optgroup key={group.id} label={group.name}>
+                            {group.models.map(({ model }) => (
+                              <option key={`${group.id}:${model.id}`} value={`${group.id}:${model.id}`}>
+                                {model.name || model.id}
+                                {(model.inputPricePerMillion ?? model.outputPricePerMillion ?? 0) > 0
+                                  ? ` — ${formatPrice(model.inputPricePerMillion)}/${formatPrice(model.outputPricePerMillion)}/1M`
+                                  : ' — local'}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ) : null
+                      )}
+                    </select>
+                    <input type="text" list={`d4-team-seats-${role}`} value={value} onChange={(e) => updateSettings({ aiTeam: { ...(settings.aiTeam ?? { planner: '', analyst: '', executor: '' }), [role]: e.target.value } })} className="sr-only" tabIndex={-1} aria-hidden="true" />
+                    <datalist id={`d4-team-seats-${role}`}>
+                      {teamVendors.map((group) => group.models.map(({ model }) => (
+                        <option key={`${group.id}:${model.id}`} value={`${group.id}:${model.id}`}>
+                          {model.name || model.id}
+                        </option>
+                      )))}
+                    </datalist>
+                  </div>
                   {issue && invalid && (
                     <div className="flex items-center gap-1.5 text-[10px] text-amber-400/90">
                       <span className="min-w-0 truncate">

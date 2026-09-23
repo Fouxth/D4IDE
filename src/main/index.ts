@@ -6,6 +6,7 @@ import { mcpClient } from './mcp/mcp-client';
 import { browserService } from './browser/browser-service';
 import { logService } from './logging/log-service';
 import { updateService } from './updater/update-service';
+import { localLlmDetectService } from './local-llm/local-detect';
 import { catalogRefreshService } from './ai/providers/catalog-refresh';
 import { providerHealthService } from './ai/providers/health-check-service';
 import { appStore } from './database/store';
@@ -189,6 +190,10 @@ app.whenReady().then(() => {
   createWindow();
   updateService.setWindowProvider(() => mainWindow);
   providerHealthService.setWindowProvider(() => mainWindow);
+  // One-time local LLM nudge: if Ollama answers on this machine, the renderer
+  // offers to enable it with one click (see src/main/local-llm/local-detect.ts).
+  localLlmDetectService.setWindowProvider(() => mainWindow);
+  localLlmDetectService.start(appStore.getSettings());
   // Detection only, and deliberately late: D4IDE looks for a newer build on its
   // own so it can say so, but downloading, installing and restarting are always
   // the user's click (see src/main/updater/update-service.ts).
@@ -210,6 +215,7 @@ app.whenReady().then(() => {
 app.on('before-quit', async () => {
   logService.info('app', 'Shutting down');
   updateService.stop();
+  localLlmDetectService.stop();
   catalogRefreshService.stop();
   providerHealthService.stop();
   terminalService.killAll();

@@ -316,6 +316,24 @@ const VendorCard: React.FC<VendorCardProps> = ({ group, drafts, onDraftChange, o
 
       {/* API key + base URL */}
       <div className="px-3.5 pb-3 space-y-2.5">
+        {!requiresKey && (() => {
+          /* A local runtime's whole UX is this row: the server must already be
+             running, one Test press introduces it, and after that its models
+             flow into the picker and the AI team automatically. */
+          const status = primaryDraft.status;
+          const ready = status === 'connected' || primaryDraft.models.length > 0;
+          return (
+            <div className="rounded border border-blue-400/25 bg-blue-400/5 px-2.5 py-2 space-y-1">
+              <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-blue-300">
+                <span className={`w-1.5 h-1.5 rounded-full ${ready ? 'bg-emerald-400' : 'bg-d4-dimmed'}`} />
+                <span>{t('providers.localStatus')}</span>
+              </div>
+              <p className="text-[11px] leading-relaxed text-d4-dimmed">
+                {ready ? t('providers.localReady') : t('providers.localNotRunning')}
+              </p>
+            </div>
+          );
+        })()}
         {requiresKey && (
           <div className="space-y-1">
             <div className="flex items-center justify-between">

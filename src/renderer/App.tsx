@@ -4,6 +4,7 @@ import { LeftNav } from './components/LeftNav';
 import { StatusBar } from './components/StatusBar';
 import { ToastHost } from './components/ToastHost';
 import { UpdatePrompt } from './components/UpdatePrompt';
+import { LocalLlmPrompt } from './components/LocalLlmPrompt';
 import { ProviderDialog } from './components/ProviderDialog';
 import { AgentTimeline } from './features/agent/AgentTimeline';
 import { ConversationMap } from './features/agent/ConversationMap';
@@ -23,6 +24,7 @@ import { useAgentStore } from './stores/agentStore';
 import { useChangesStore } from './stores/changesStore';
 import { useProject, useProjectStore } from './stores/projectStore';
 import { useUsageStore } from './stores/usageStore';
+import { useLocalLlmStore } from './stores/localLlmStore';
 import { useQueueStore } from './stores/queueStore';
 import { useSessionsStore } from './stores/sessionsStore';
 import { useSpacesStore } from './stores/spacesStore';
@@ -314,6 +316,9 @@ const App: React.FC = () => {
     startUpdateWatch();
     startCatalogWatch();
     startHealthWatch();
+    // The one-time local-LLM nudge listens here; the main process decides
+    // whether an offer is ever pushed.
+    useLocalLlmStore.getState().start();
 
     if (!window.electronAPI) return;
 
@@ -797,6 +802,7 @@ const App: React.FC = () => {
       )}
       <ApprovalDialog request={approvalRequest} onResolve={handleResolveApproval} />
       <UpdatePrompt />
+      <LocalLlmPrompt />
       <ToastHost />
     </div>
   );

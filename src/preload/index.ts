@@ -277,6 +277,14 @@ export const electronAPI = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.UPDATE_STATUS, handler);
   },
 
+  // Local LLM nudge: main pushes when a keyless runtime answers on this machine.
+  onLocalLlmFound: (callback: (offer: { vendor: string; modelCount: number }) => void) => {
+    const handler = (_event: any, offer: any) => callback(offer);
+    ipcRenderer.on(IPC_CHANNELS.LOCAL_LLM_FOUND, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.LOCAL_LLM_FOUND, handler);
+  },
+  enableLocalLlm: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_LLM_ENABLE),
+
   // Model catalogue: check stages what providers report, apply is a click
   getCatalogStatus: () => ipcRenderer.invoke(IPC_CHANNELS.CATALOG_STATUS),
   checkCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.CATALOG_CHECK),
