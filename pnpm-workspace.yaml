@@ -1,18 +1,17 @@
 # Build scripts pnpm is allowed to run.
 #
-# `better-sqlite3` is deliberately NOT here: its own install script builds for
-# whatever Node runs pnpm, and Node has no prebuild for it in this project —
-# the build fails and, worse, replaces the Electron binary that `pnpm
+# `better-sqlite3` is deliberately NOT allowed to build: its own install script
+# builds for whatever Node runs pnpm, and Node has no prebuild for it in this
+# project — the build fails and, worse, replaces the Electron binary that `pnpm
 # rebuild:native` had just installed. `scripts/rebuild-native.cjs` fetches the
 # Electron-ABI prebuild instead, and `pnpm dist` runs it before packaging.
+#
+# pnpm 12 spells this setting `allowBuilds` (a name → boolean map) and
+# hard-errors on build scripts that are neither allowed nor explicitly
+# ignored — CI is non-interactive, so the prompt can never be answered and
+# `pnpm install --frozen-lockfile` dies. Every entry must be a real boolean.
 allowBuilds:
-  better-sqlite3: set this to true or false
+  better-sqlite3: false
   electron: true
   esbuild: true
   node-pty: true
-
-# pnpm 10 spelling of the same setting (it predates the `allowBuilds` map).
-onlyBuiltDependencies:
-  - electron
-  - esbuild
-  - node-pty
