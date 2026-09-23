@@ -33,6 +33,18 @@ export function isTeamConfigured(team: TeamConfig | undefined | null): boolean {
 }
 
 /**
+ * Whether the runtime should honour the seats at all.
+ *
+ * The master switch is the loud part of the feature: off means the assignments
+ * stay on disk untouched but every seat falls back to the main model. An unset
+ * flag (settings written before the switch existed) counts as on — the team was
+ * already live for those users, and an upgrade must not silently disband it.
+ */
+export function isTeamEnabled(settings: { aiTeamEnabled?: boolean } | undefined | null): boolean {
+  return settings?.aiTeamEnabled !== false;
+}
+
+/**
  * Parses `provider:model`.
  *
  * Everything malformed — no separator, empty halves, whitespace — returns null

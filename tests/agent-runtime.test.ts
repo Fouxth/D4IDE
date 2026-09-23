@@ -1803,6 +1803,30 @@ describe('agent runtime — AI team (model per role)', () => {
     providerManager.reloadProviders();
   });
 
+  it('the master switch off sends plan requests to the main model — seats stay written but unused', async () => {
+    appStore.saveSettings({
+      aiTeamEnabled: false,
+      aiTeam: { planner: `${TEAM_PROVIDER_ID}:${TEAM_MODEL_ID}`, analyst: '', executor: '' }
+    });
+    const planner = new ModelRecordingProvider([[]]);
+    const main = new ModelRecordingProvider([[]]);
+    providerManager.setProviderInstance(PROVIDER_ID, main as any);
+    providerManager.setProviderInstance(TEAM_PROVIDER_ID, planner as any);
+
+    const { win, events } = createWindow();
+    const run = agentRuntime.run(win, { prompt: 'Plan a change', mode: 'plan', projectPath, sessionId: 's_team_off' });
+    await waitFor(() => timelineOf(events).some((item) => item.type === 'plan'));
+    agentRuntime.approvePlan();
+    await run;
+
+    // The seat never saw a request, the main model wrote the plan.
+    expect(planner.requestedModels.length).toBe(0);
+    expect(main.requestedModels.length).toBeGreaterThan(0);
+    // Assignments stay on disk — flipping the switch back restores the team.
+    expect(appStore.getSettings().aiTeam?.planner).toBe(`${TEAM_PROVIDER_ID}:${TEAM_MODEL_ID}`);
+    appStore.saveSettings({ aiTeamEnabled: true });
+  });
+
   it('sends plan-mode requests to the planner seat', async () => {
     appStore.saveSettings({ aiTeam: { planner: `${TEAM_PROVIDER_ID}:${TEAM_MODEL_ID}`, analyst: '', executor: '' } });
     const planner = new ModelRecordingProvider([[]]);

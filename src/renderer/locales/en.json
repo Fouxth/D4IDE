@@ -12,7 +12,9 @@
     "checkedAt": "checked at {{time}}",
     "seatSet": "Set {{role}} = {{model}}",
     "seatCleared": "Cleared the {{role}} seat back to the main model",
-    "seatToggleHint": "Toggle: let the {{role}} use this model / back to the main model"
+    "seatToggleHint": "Toggle: let the {{role}} use this model / back to the main model",
+    "addPlaceholder": "Add another model…",
+    "addApply": "Add"
   },
   "localLlm": {
     "aria": "Local model found",
@@ -1013,6 +1015,13 @@
     "aiTeamPresetClear": "Back to main model",
     "aiTeamPresetClearDesc": "Wipe every seat — all roles return to the main model",
     "aiTeamNoCandidates": "No tool-capable model yet (enable a provider first)",
+    "aiTeamPickLocal": "Pick from local models",
+    "aiTeamToggle": "Use AI team",
+    "aiTeamToggleHint": "Off = every seat temporarily falls back to the main model (assignments are kept) — switching back restores the team",
+    "aiTeamOnToast": "AI team on — the configured seats are back in charge",
+    "aiTeamOffToast": "AI team off — every role temporarily uses the main model (assignments kept)",
+    "aiTeamOffNote": "The AI team is off — every seat temporarily uses the main model. Nothing was erased; flip the switch above to restore.",
+    "aiTeamPickLocalHint": "Opens the provider hub's my-local-models card — tap a role chip on a free model",
     "aiTeamApplied": "AI team updated — review the seats below",
     "aiTeamFixTo": "Fix to {{model}}",
     "aiTeamIssueNoFix": "This seat is skipped to the main model — no tool-capable model is available to suggest",

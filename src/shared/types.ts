@@ -578,6 +578,8 @@ export interface AppSettings {
    * seat is filled, and a malformed seat falls back the same way.
    */
   aiTeam: TeamConfig;
+  /** Master switch for the AI team — off means every seat falls back to the main model. */
+  aiTeamEnabled: boolean;
   autoFallback: boolean;
   fallbackChain: string[];
   toolTimeoutMs: number;

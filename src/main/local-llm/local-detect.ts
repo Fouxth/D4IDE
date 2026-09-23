@@ -141,11 +141,6 @@ export class LocalLlmDetectService {
       return null;
     }
   }
-
-  /** Back-compat name used by earlier tests and callers: probe the list head-first. */
-  async probe(): Promise<LocalLlmOffer | null> {
-    return this.probeAll();
-  }
 }
 
 export const localLlmDetectService = new LocalLlmDetectService();

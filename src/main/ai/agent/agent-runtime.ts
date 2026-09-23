@@ -31,7 +31,7 @@ import {
   questionCardTitle
 } from '../../../shared/questions';
 import { IPC_CHANNELS } from '../../../shared/ipc-events';
-import { parseAssignment, TEAM_ROLE_LABEL, type TeamRole } from '../../../shared/ai-team';
+import { isTeamEnabled, parseAssignment, TEAM_ROLE_LABEL, type TeamRole } from '../../../shared/ai-team';
 import { providerManager, AutoRouteDecision } from '../providers/provider-manager';
 import { IAIProvider, classifyThrownError } from '../providers/provider-interface';
 import { toolRegistry, detectScriptCommand, hasPackageScript } from '../tools/tool-registry';
@@ -285,7 +285,9 @@ export class AgentRuntime {
    * the seat travels with the run's own model, not whatever the settings say now.
    */
   private teamSeat(role: TeamRole): { providerId: string; modelId: string } | null {
-    const seat = parseAssignment(appStore.getSettings().aiTeam?.[role]);
+    const settings = appStore.getSettings();
+    if (!isTeamEnabled(settings)) return null;
+    const seat = parseAssignment(settings.aiTeam?.[role]);
     if (!seat) return null;
     const config = providerManager.getConfig(seat.providerId);
     if (!config || config.enabled === false) return null;

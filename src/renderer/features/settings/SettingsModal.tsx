@@ -305,7 +305,7 @@ const SessionsTab: React.FC<{ onClose: () => void; embedded?: boolean }> = ({ on
 
 // ------------------------------------------------------------------ pages
 
-const GeneralPage: React.FC<{ onClose: () => void; openSection?: string }> = ({ onClose, openSection }) => {
+const GeneralPage: React.FC<{ onClose: () => void; openSection?: string; onOpenProviders?: (view?: 'list' | 'add') => void }> = ({ onClose, openSection, onOpenProviders }) => {
   const { t } = useTranslation();
   const { settings, updateSettings, setLanguage } = useSettingsStore();
   const { clearSession } = useAgentStore();
@@ -573,7 +573,9 @@ const GeneralPage: React.FC<{ onClose: () => void; openSection?: string }> = ({ 
 
       {/* ---------------------------------------------------------- usage */}
       <Section id="usage" title={t('settings.budgets')} open={!!open.usage} onToggle={() => toggle('usage')}>
-        <UsageDashboard embedded />
+        {/* The AI-team card can hand a broken seat to the provider hub's local
+            models — closing the settings modal is how that hand-off starts. */}
+        <UsageDashboard embedded onRequestProviders={() => { onClose(); onOpenProviders?.('list'); }} />
       </Section>
 
       {/* ---------------------------------------------------- diagnostics */}
@@ -1046,7 +1048,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <PageHeader title={titles[page].title} hint={titles[page].hint} />
 
           <div className="mt-6">
-            {page === 'general' && <GeneralPage onClose={onClose} openSection={requested.section} />}
+            {page === 'general' && <GeneralPage onClose={onClose} openSection={requested.section} onOpenProviders={onOpenProviders} />}
             {page === 'appearance' && <AppearancePage />}
             {page === 'connectors' && <McpTab embedded />}
             {page === 'projects' && <ProjectsPage onOpenProject={onOpenProject} />}

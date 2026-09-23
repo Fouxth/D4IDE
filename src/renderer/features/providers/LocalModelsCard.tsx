@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, HardDrive, RefreshCw } from 'lucide-react';
+import { Check, HardDrive, Plus, RefreshCw } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
 import { formatBytes, seatsHolding, toLocalModelEntries, type LocalModelEntry } from '../../../shared/local-models';
 import { TEAM_ROLE_LABEL, type TeamRole } from '../../../shared/ai-team';
+import { groupProviders, isProviderChoosable } from '../../../shared/provider-vendors';
+import { formatPrice } from '../../lib/format';
 
 interface InventoryResponse {
   answers: Array<{ providerId: string; models: Array<{ id?: string; name?: string; sizeBytes?: number; detail?: string }> }>;
@@ -32,6 +34,21 @@ export const LocalModelsCard: React.FC = () => {
   // mutate the existing object, and a memo keyed on the reference never
   // re-runs (the same trap the seat-audit fell into once).
   const teamKey = `${aiTeam?.planner ?? ''}|${aiTeam?.analyst ?? ''}|${aiTeam?.executor ?? ''}`;
+
+  // The "add another model" row draws from the full picker pool — the same
+  // groups the composer's model menu shows — because the machine's own runtime
+  // list is short but the team is not limited to it.
+  const activeIds = useMemo(() => providers.filter((p) => p.enabled).map((p) => p.id), [providers]);
+  const pickerGroups = useMemo(
+    () =>
+      groupProviders(
+        providers.filter((p) => isProviderChoosable(p, activeIds, { localProvidersEnabled: settings?.localProvidersEnabled })),
+        { activeProviderIds: activeIds }
+      ),
+    [providers, activeIds, settings?.localProvidersEnabled]
+  );
+  const [addSeat, setAddSeat] = useState<TeamRole>('planner');
+  const [addValue, setAddValue] = useState('');
 
   const load = useCallback(async () => {
     if (!window.electronAPI?.listLocalModels) return;
@@ -149,6 +166,62 @@ export const LocalModelsCard: React.FC = () => {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Add any pickable model to a seat — the machine's runtime list is
+          what answered, but the team is not limited to it. */}
+      {pickerGroups.length > 0 && (
+        <div className="px-3 py-2 border-t border-d4-border-subtle">
+          <div className="flex items-center gap-1.5">
+            <Plus className="w-3 h-3 text-d4-muted shrink-0" />
+            <select
+              value={addValue}
+              onChange={(e) => setAddValue(e.target.value)}
+              className="flex-1 min-w-0 bg-d4-bg border border-d4-border rounded px-1.5 py-1 text-[11px] text-d4-text focus:outline-none focus:border-d4-accent"
+            >
+              <option value="">{t('localModels.addPlaceholder')}</option>
+              {pickerGroups.map((group) =>
+                group.models.length > 0 ? (
+                  <optgroup key={group.id} label={group.name}>
+                    {group.models.map(({ model }) => (
+                      <option key={`${group.id}:${model.id}`} value={`${group.id}:${model.id}`}>
+                        {model.name || model.id}
+                        {(model.inputPricePerMillion ?? model.outputPricePerMillion ?? 0) > 0
+                          ? ` — ${formatPrice(model.inputPricePerMillion)}/${formatPrice(model.outputPricePerMillion)}/1M`
+                          : ' — local'}
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null
+              )}
+            </select>
+            <select
+              value={addSeat}
+              onChange={(e) => setAddSeat(e.target.value as TeamRole)}
+              className="bg-d4-bg border border-d4-border rounded px-1.5 py-1 text-[11px] text-d4-text focus:outline-none focus:border-d4-accent"
+            >
+              {(['planner', 'analyst', 'executor'] as TeamRole[]).map((role) => (
+                <option key={role} value={role}>
+                  {TEAM_ROLE_LABEL[role][lang]}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!addValue}
+              onClick={() => {
+                const current = settings?.aiTeam ?? { planner: '', analyst: '', executor: '' };
+                void updateSettings({ aiTeam: { ...current, [addSeat]: addValue } }).then(() => {
+                  toast.success(t('localModels.seatSet', { role: TEAM_ROLE_LABEL[addSeat][lang], model: addValue.split(':').slice(1).join(':') }));
+                  setAddValue('');
+                });
+              }}
+              className="px-2 py-1 rounded text-[11px] font-medium bg-d4-accent text-black hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+            >
+              {t('localModels.addApply')}
+            </button>
+          </div>
         </div>
       )}
 

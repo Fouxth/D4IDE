@@ -40,6 +40,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   cheaperModelForSmallTasks: false,
   cheapModelId: '',
   aiTeam: DEFAULT_TEAM_CONFIG,
+  aiTeamEnabled: true,
   autoFallback: false,
   fallbackChain: [],
   toolTimeoutMs: 120000,

@@ -13,6 +13,7 @@ import {
   buildTeamFromPreset,
   DEFAULT_TEAM_CONFIG,
   isTeamConfigured,
+  isTeamEnabled,
   parseAssignment,
   TEAM_PRESETS,
   TEAM_ROLES,
@@ -68,6 +69,25 @@ describe('ai-team — configured check', () => {
 
   it('covers all three roles', () => {
     expect(TEAM_ROLES).toEqual(['planner', 'analyst', 'executor']);
+  });
+});
+
+describe('ai-team — the master switch', () => {
+  it('off means the runtime ignores every seat, whatever is written there', () => {
+    expect(isTeamEnabled({ aiTeamEnabled: false })).toBe(false);
+  });
+
+  it('on — and settings written before the switch existed — keeps the team live', () => {
+    expect(isTeamEnabled({ aiTeamEnabled: true })).toBe(true);
+    expect(isTeamEnabled({})).toBe(true);
+    expect(isTeamEnabled(undefined)).toBe(true);
+    expect(isTeamEnabled(null)).toBe(true);
+  });
+
+  it('the switch does not change whether seats are filled — those are different questions', () => {
+    const team = { planner: 'a:b', analyst: '', executor: 'c:d' };
+    expect(isTeamEnabled({ aiTeamEnabled: false }) && isTeamConfigured(team)).toBe(false);
+    expect(!isTeamEnabled({ aiTeamEnabled: false }) || isTeamConfigured(team)).toBe(true);
   });
 });
 

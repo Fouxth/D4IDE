@@ -58,10 +58,10 @@ describe('local-models — byte sizes as human lines', () => {
     expect(formatBytes(Number.NaN)).toBeNull();
   });
 
-  it('scales to the readable unit', () => {
+  it('scales to the readable unit, decimal like ollama list prints', () => {
     expect(formatBytes(512)).toBe('512 B');
     expect(formatBytes(2048)).toBe('2 KB');
-    expect(formatBytes(4_700_000_000)).toBe('4.4 GB');
+    expect(formatBytes(23_938_333_577)).toBe('23.9 GB');
   });
 });
 

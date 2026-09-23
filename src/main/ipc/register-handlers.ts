@@ -42,6 +42,7 @@ import { readProjectMemory, writeProjectMemory, memorySkeleton } from '../projec
 import { ProjectDesign, readProjectDesign, writeProjectDesign } from '../project/design-store';
 import { DesignStyle } from '../../shared/design-profiles';
 import { collectLocalModelsInventory } from '../local-llm/local-models-service';
+import { isLocalRuntime } from '../../shared/provider-vendors';
 import {
   BufferSnapshot,
   LogChannel,
@@ -414,8 +415,16 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   // its models land in the picker without a second round-trip.
   ipcMain.handle(IPC_CHANNELS.LOCAL_LLM_ENABLE, async () => {
     appStore.saveSettings({ localProvidersEnabled: true });
-    const ollama = appStore.getSanitizedProviders().find((p) => p.type === 'ollama');
-    if (ollama) await providerManager.testConnection(ollama.id);
+    // Every keyless runtime gets the same first probe — enabling the flag must
+    // prove which servers actually answer, not just Ollama's.
+    const locals = appStore.getSanitizedProviders().filter((p) => p.enabled && isLocalRuntime(p));
+    for (const local of locals) {
+      try {
+        await providerManager.testConnection(local.id);
+      } catch {
+        // A runtime that is off right now is fine — its card explains the flow.
+      }
+    }
     return { settings: appStore.getSettings(), providers: appStore.getSanitizedProviders() };
   });
 

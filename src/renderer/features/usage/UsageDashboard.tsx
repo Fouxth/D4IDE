@@ -12,6 +12,7 @@ import {
   auditTeamSeats,
   buildTeamFromPreset,
   isTeamConfigured,
+  isTeamEnabled,
   TEAM_PRESETS,
   TEAM_ROLES,
   TEAM_ROLE_LABEL,
@@ -62,7 +63,9 @@ const BucketTable: React.FC<{ title: string; buckets: UsageBucket[] }> = ({ titl
 export const UsageDashboard: React.FC<{
   /** True when the page above already carries this heading (Settings → General). */
   embedded?: boolean;
-}> = ({ embedded }) => {
+  /** Offered to a broken seat: jump to the provider hub's local models card. */
+  onRequestProviders?: () => void;
+}> = ({ embedded, onRequestProviders }) => {
   const { t } = useTranslation();
   const { summary, load, reset, isLoading } = useUsageStore();
   const { settings, updateSettings, providers } = useSettingsStore();
@@ -98,6 +101,9 @@ export const UsageDashboard: React.FC<{
    * (the demo bridge) mutate settings in place, and an object-identity memo
    * would keep showing a stale audit. */
   const aiTeam = settings?.aiTeam;
+  // The master switch. Keyed on the boolean, not the settings object — the
+  // same mutation-proofing as the seat audit below.
+  const teamOn = isTeamEnabled(settings);
   const seatAudit = useMemo(
     () => auditTeamSeats(aiTeam, providers),
     [aiTeam?.planner, aiTeam?.analyst, aiTeam?.executor, providers]
@@ -272,20 +278,42 @@ export const UsageDashboard: React.FC<{
       </div>
 
       {/* The AI team: one job, three seats. A seat left empty keeps the main
-          model, so the whole card is inert until someone types in it. */}
+          model, so the whole card is inert until someone types in it. The
+          master switch disbands the team without erasing the assignments. */}
       <div className="bg-d4-surface border border-d4-border rounded-md p-3 space-y-3">
-        <div className="text-[11px] uppercase font-semibold text-d4-dimmed">{t('usage.aiTeam')}</div>
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[11px] uppercase font-semibold text-d4-dimmed">{t('usage.aiTeam')}</div>
+          <label className="flex items-center gap-1.5 cursor-pointer select-none shrink-0" title={t('usage.aiTeamToggleHint')}>
+            <span className="text-[10px] text-d4-muted">{t('usage.aiTeamToggle')}</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={teamOn}
+              onClick={() => {
+                void updateSettings({ aiTeamEnabled: !teamOn });
+                toast.info(teamOn ? t('usage.aiTeamOffToast') : t('usage.aiTeamOnToast'));
+              }}
+              className={`relative w-8 h-4.5 h-[18px] rounded-full transition-colors ${teamOn ? 'bg-emerald-500/70' : 'bg-d4-border'}`}
+            >
+              <span
+                className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-all ${teamOn ? 'left-[16px]' : 'left-[2px]'}`}
+              />
+            </button>
+          </label>
+        </div>
         <p className="text-[11px] text-d4-dimmed leading-relaxed">{t('usage.aiTeamHint')}</p>
 
         {/* Presets: one click, all three seats. The picker reads the user's own
             provider catalogue, so a preset can only ever fill seats the user
             actually has — and with no tool-capable model, there is nothing
             honest to fill in, so the row goes inert instead of guessing. */}
+        {!teamOn && <p className="text-[11px] text-amber-400/90">{t('usage.aiTeamOffNote')}</p>}
+
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-[10px] uppercase text-d4-dimmed mr-0.5">{t('usage.aiTeamPresets')}</span>
           {TEAM_PRESETS.map((preset) => {
             const isClear = preset === 'clear';
-            const disabled = !isClear && seatCandidates.length === 0;
+            const disabled = (!isClear && seatCandidates.length === 0) || (!teamOn && !isClear);
             return (
               <button
                 key={preset}
@@ -366,6 +394,16 @@ export const UsageDashboard: React.FC<{
                           className="px-1.5 py-px rounded-full border border-amber-400/40 text-amber-300 hover:bg-amber-400/10 shrink-0 transition-colors"
                         >
                           {t('usage.aiTeamFixTo', { model: `${issue.suggestion.providerId}:${issue.suggestion.modelId}` })}
+                        </button>
+                      )}
+                      {onRequestProviders && (
+                        <button
+                          type="button"
+                          onClick={onRequestProviders}
+                          title={t('usage.aiTeamPickLocalHint')}
+                          className="px-1.5 py-px rounded-full border border-d4-border text-d4-muted hover:text-d4-text hover:border-d4-dimmed shrink-0 transition-colors"
+                        >
+                          {t('usage.aiTeamPickLocal')}
                         </button>
                       )}
                     </div>
