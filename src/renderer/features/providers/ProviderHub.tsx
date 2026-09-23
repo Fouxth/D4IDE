@@ -25,7 +25,7 @@ import i18n from '../../lib/i18n';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
 import { ModelInfo, ProviderConfig, ProviderTestAllResult, ProviderTestResult } from '../../../shared/types';
-import { VendorGroup, VendorModel, groupProviders } from '../../../shared/provider-vendors';
+import { VendorGroup, VendorModel, groupProviders, isLocalRuntime } from '../../../shared/provider-vendors';
 import { formatPrice, providerErrorLabel } from '../../lib/format';
 import { AddProviderDialog } from './AddProviderDialog';
 
@@ -680,8 +680,19 @@ export const ProviderHub: React.FC<{
     [providers, settings?.activeProviderId]
   );
 
-  const inUse = useMemo(() => groups.filter((group) => group.inUse), [groups]);
-  const unused = useMemo(() => groups.filter((group) => !group.inUse), [groups]);
+  // A local runtime the user has engaged with is never "unused": its status row
+  // is the only place that explains the start-the-server-then-Test flow, and a
+  // card hidden behind the unused toggle is a card its own audience never sees.
+  // "Engaged" means the picker flag is on, or the runtime actually answered a
+  // test (seeded model entries alone are on every fresh install — not evidence).
+  const localAlwaysShown = useMemo(() => {
+    if (!settings?.localProvidersEnabled) return new Set<string>();
+    return new Set(
+      groups.filter((group) => group.providers.some(isLocalRuntime) && group.status === 'connected').map((group) => group.id)
+    );
+  }, [groups, settings?.localProvidersEnabled]);
+  const inUse = useMemo(() => groups.filter((group) => group.inUse || localAlwaysShown.has(group.id)), [groups, localAlwaysShown]);
+  const unused = useMemo(() => groups.filter((group) => !inUse.includes(group)), [inUse, groups]);
   const shown = (showUnused ? groups : inUse).filter((group) => {
     if (!filter.trim()) return true;
     const q = filter.toLowerCase();

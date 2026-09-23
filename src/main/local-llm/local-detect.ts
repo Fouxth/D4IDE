@@ -6,19 +6,47 @@ import type { BrowserWindow } from 'electron';
  * One-time "there is a local LLM right here" nudge (spec §26 neighbourhood).
  *
  * D4IDE ships Ollama and LM Studio as keyless presets, but a shipped preset is
- * only a guess until its server answers — and a user who just installed Ollama
- * has no reason to know D4IDE can talk to it. So, once per install, shortly
- * after launch, the main process asks `localhost:11434` for its model list. A
- * real answer is pushed to the renderer as an offer; enabling is one click on
- * the existing `localProvidersEnabled` switch, and "not now" writes a flag so
- * the question is never asked again.
+ * only a guess until its server answers — and a user who just installed one of
+ * them has no reason to know D4IDE can talk to it. So, once per install,
+ * shortly after launch, the main process asks each known runtime for its model
+ * list. A real answer is pushed to the renderer as an offer; enabling is one
+ * click on the existing `localProvidersEnabled` switch, and "not now" writes a
+ * flag so the question is never asked again.
  *
  * Everything that decides is exported pure and tested; the class is thin glue
  * around a timer, a fetch and a window.
  */
 
-/** The one runtime probed for now — Ollama's local API is a stable, keyless GET. */
-export const OLLAMA_TAGS_URL = 'http://127.0.0.1:11434/api/tags';
+export interface LocalRuntime {
+  /** The provider preset this runtime maps to — the thing enabling turns on. */
+  vendor: string;
+  url: string;
+  /** Turns a response body into a model count, per runtime's API shape. */
+  countModels: (payload: unknown) => number;
+}
+
+/** Ollama: GET /api/tags → { models: [...] }. */
+const OLLAMA: LocalRuntime = {
+  vendor: 'ollama',
+  url: 'http://127.0.0.1:11434/api/tags',
+  countModels: (payload) => {
+    const models = (payload as { models?: unknown } | null)?.models;
+    return Array.isArray(models) ? models.length : 0;
+  }
+};
+
+/** LM Studio: OpenAI-shaped GET /v1/models → { data: [...] }. */
+const LM_STUDIO: LocalRuntime = {
+  vendor: 'lmstudio',
+  url: 'http://127.0.0.1:1234/v1/models',
+  countModels: (payload) => {
+    const data = (payload as { data?: unknown } | null)?.data;
+    return Array.isArray(data) ? data.length : 0;
+  }
+};
+
+/** The runtimes probed, in the order their offers would win. */
+export const LOCAL_RUNTIMES: readonly LocalRuntime[] = [OLLAMA, LM_STUDIO];
 
 export interface LocalLlmSettingsGate {
   localProvidersEnabled?: boolean;
@@ -34,22 +62,19 @@ export function shouldOfferLocalLlm(settings: LocalLlmSettingsGate | undefined |
 }
 
 export interface LocalLlmOffer {
-  vendor: 'ollama';
+  vendor: string;
   /** How many models the runtime reported — shown in the nudge. */
   modelCount: number;
 }
 
 /**
- * Turns an `/api/tags` payload into an offer. Anything unexpected — non-JSON,
- * an error status, a model-less server (installed but nothing pulled yet) — is
- * null: a server with no models cannot back a single seat, so there is nothing
+ * A runtime's answer becomes an offer only when it names at least one model —
+ * a server with nothing pulled cannot back a single seat, so there is nothing
  * honest to invite the user to.
  */
-export function offerFromTagsPayload(payload: unknown): LocalLlmOffer | null {
-  if (!payload || typeof payload !== 'object') return null;
-  const models = (payload as { models?: unknown }).models;
-  if (!Array.isArray(models) || models.length === 0) return null;
-  return { vendor: 'ollama', modelCount: models.length };
+export function offerFromPayload(vendor: string, countModels: (payload: unknown) => number, payload: unknown): LocalLlmOffer | null {
+  const modelCount = countModels(payload);
+  return modelCount > 0 ? { vendor, modelCount } : null;
 }
 
 type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
@@ -74,7 +99,7 @@ export class LocalLlmDetectService {
     if (!shouldOfferLocalLlm(settings)) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.probe();
+      void this.probeAll();
     }, delayMs);
     this.timer.unref?.();
   }
@@ -84,22 +109,42 @@ export class LocalLlmDetectService {
     this.timer = null;
   }
 
-  /** Probe now (also the seam tests drive). Pushes an offer when one is earned. */
-  async probe(): Promise<LocalLlmOffer | null> {
-    const window = this.getWindow();
-    if (!window || window.isDestroyed()) return null;
-    let offer: LocalLlmOffer | null = null;
+  /**
+   * Probe every runtime once (each with its own timeout — one hung server must
+   * not blind the other) and push the first offer. Nothing listening is the
+   * normal case; silence is the whole feature.
+   */
+  async probeAll(): Promise<LocalLlmOffer | null> {
+    for (const runtime of LOCAL_RUNTIMES) {
+      const offer = await this.probeOne(runtime);
+      if (offer) {
+        const window = this.getWindow();
+        if (!window || window.isDestroyed()) return null;
+        logService.info('app', 'A local LLM runtime answered — offering to enable it', {
+          vendor: offer.vendor,
+          models: offer.modelCount
+        });
+        window.webContents.send(IPC_CHANNELS.LOCAL_LLM_FOUND, offer);
+        return offer;
+      }
+    }
+    return null;
+  }
+
+  /** Kept for callers (and tests) that want one runtime's verdict directly. */
+  async probeOne(runtime: LocalRuntime): Promise<LocalLlmOffer | null> {
     try {
-      const response = await this.fetchImpl(OLLAMA_TAGS_URL, { signal: AbortSignal.timeout(1500) });
-      if (response.ok) offer = offerFromTagsPayload(await response.json());
+      const response = await this.fetchImpl(runtime.url, { signal: AbortSignal.timeout(1500) });
+      if (!response.ok) return null;
+      return offerFromPayload(runtime.vendor, runtime.countModels, await response.json());
     } catch {
-      // Nothing listening is the normal case; silence is the whole feature.
       return null;
     }
-    if (!offer) return null;
-    logService.info('app', 'A local LLM runtime answered — offering to enable it', { vendor: offer.vendor, models: offer.modelCount });
-    window.webContents.send(IPC_CHANNELS.LOCAL_LLM_FOUND, offer);
-    return offer;
+  }
+
+  /** Back-compat name used by earlier tests and callers: probe the list head-first. */
+  async probe(): Promise<LocalLlmOffer | null> {
+    return this.probeAll();
   }
 }
 
