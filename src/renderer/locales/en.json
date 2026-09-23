@@ -1,4 +1,19 @@
 {
+  "localModels": {
+    "title": "My local models",
+    "refresh": "Refresh",
+    "empty": "No local model answered yet — start Ollama or LM Studio, then refresh",
+    "ggufTitle": "Got a .gguf file — how to import it",
+    "ggufOllama": "Ollama: create a text file named Modelfile next to the .gguf containing FROM ./your-file.gguf, then run ollama create model-name -f Modelfile — or pull straight from Hugging Face: ollama run hf.co/owner/repo:Q4_K_M",
+    "ggufLmstudio": "LM Studio: open My Models and drag the .gguf in (or place it under the models folder as models/owner/repo/file.gguf) — the file must sit inside a folder",
+    "ggufNote": "Once imported, the model shows up on this card after a refresh — D4IDE never reads .gguf files itself",
+    "loadFailed": "Could not load the local model list — try refreshing",
+    "sizeUnknown": "size not reported",
+    "checkedAt": "checked at {{time}}",
+    "seatSet": "Set {{role}} = {{model}}",
+    "seatCleared": "Cleared the {{role}} seat back to the main model",
+    "seatToggleHint": "Toggle: let the {{role}} use this model / back to the main model"
+  },
   "localLlm": {
     "aria": "Local model found",
     "title": "{{vendor}} is running on this machine",

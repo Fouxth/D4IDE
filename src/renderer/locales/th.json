@@ -1,4 +1,19 @@
 {
+  "localModels": {
+    "title": "โมเดลในเครื่องของฉัน",
+    "refresh": "รีเฟรช",
+    "empty": "ยังไม่มีโมเดลในเครื่องตอบกลับ — เปิด Ollama หรือ LM Studio ไว้แล้วกดรีเฟรช",
+    "ggufTitle": "มีไฟล์ .gguf แล้ว — วิธีนำเข้า",
+    "ggufOllama": "Ollama: สร้างไฟล์ข้อความชื่อ Modelfile ข้างไฟล์ .gguf พร้อมบรรทัด FROM ./ชื่อไฟล์.gguf แล้วรัน ollama create ชื่อโมเดล -f Modelfile หรือดึงจาก Hugging Face ตรง ๆ: ollama run hf.co/ผู้อัปโหลด/รีโป:Q4_K_M",
+    "ggufLmstudio": "LM Studio: เปิดแท็บ My Models แล้วลากไฟล์ .gguf เข้าไป (หรือวางในโฟลเดอร์ models ตามโครง models/ผู้อัปโหลด/รีโป/ไฟล์.gguf) — ไฟล์ต้องอยู่ในโฟลเดอร์ครอบเสมอ",
+    "ggufNote": "นำเข้าเสร็จแล้วโมเดลจะโผล่ที่การ์ดนี้เองเมื่อกดรีเฟรช — D4IDE ไม่ต้องอ่านไฟล์ .gguf โดยตรง",
+    "loadFailed": "ดึงรายการโมเดลในเครื่องไม่สำเร็จ — ลองกดรีเฟรชอีกครั้ง",
+    "sizeUnknown": "ไม่รายงานขนาด",
+    "checkedAt": "ตรวจเมื่อ {{time}}",
+    "seatSet": "ตั้ง {{role}} = {{model}} แล้ว",
+    "seatCleared": "เคลียร์ที่นั่ง {{role}} กลับเป็นโมเดลหลักแล้ว",
+    "seatToggleHint": "กดสลับ: ให้ {{role}} ใช้โมเดลนี้ / คืนโมเดลหลัก"
+  },
   "localLlm": {
     "aria": "พบโมเดลในเครื่อง",
     "title": "พบ {{vendor}} ในเครื่องนี้",

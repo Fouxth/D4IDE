@@ -41,6 +41,7 @@ import { applyUiScale } from '../ui-scale';
 import { readProjectMemory, writeProjectMemory, memorySkeleton } from '../project/project-memory';
 import { ProjectDesign, readProjectDesign, writeProjectDesign } from '../project/design-store';
 import { DesignStyle } from '../../shared/design-profiles';
+import { collectLocalModelsInventory } from '../local-llm/local-models-service';
 import {
   BufferSnapshot,
   LogChannel,
@@ -416,6 +417,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     const ollama = appStore.getSanitizedProviders().find((p) => p.type === 'ollama');
     if (ollama) await providerManager.testConnection(ollama.id);
     return { settings: appStore.getSettings(), providers: appStore.getSanitizedProviders() };
+  });
+
+  // The inventory card's data source: each enabled local runtime is asked for
+  // its model list (Ollama carries sizes). A runtime that is off simply
+  // contributes nothing — the card renders what answered.
+  ipcMain.handle(IPC_CHANNELS.LOCAL_MODELS_LIST, async () => {
+    const inventory = await collectLocalModelsInventory(appStore.getSanitizedProviders());
+    return inventory;
   });
 
   // The renderer can ask for a health verdict right now (opening the hub, or

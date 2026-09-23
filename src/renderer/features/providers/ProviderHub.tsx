@@ -28,6 +28,7 @@ import { ModelInfo, ProviderConfig, ProviderTestAllResult, ProviderTestResult } 
 import { VendorGroup, VendorModel, groupProviders, isLocalRuntime } from '../../../shared/provider-vendors';
 import { formatPrice, providerErrorLabel } from '../../lib/format';
 import { AddProviderDialog } from './AddProviderDialog';
+import { LocalModelsCard } from './LocalModelsCard';
 
 const STATUS_STYLES: Record<string, { dot: string; label: string; text: string }> = {
   connected: { dot: 'bg-emerald-400', label: 'connected', text: 'text-emerald-400' },
@@ -795,6 +796,10 @@ export const ProviderHub: React.FC<{
       )}
 
       <div className="space-y-3">
+        {/* The machine's own models, first — the hub is where local runtimes
+            live, so their inventory belongs beside them, not in a settings
+            drawer. */}
+        <LocalModelsCard />
         {shown.map((group) => (
           <VendorCard
             key={group.id}

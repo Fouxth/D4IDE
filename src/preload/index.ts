@@ -284,6 +284,7 @@ export const electronAPI = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.LOCAL_LLM_FOUND, handler);
   },
   enableLocalLlm: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_LLM_ENABLE),
+  listLocalModels: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_MODELS_LIST),
 
   // Model catalogue: check stages what providers report, apply is a click
   getCatalogStatus: () => ipcRenderer.invoke(IPC_CHANNELS.CATALOG_STATUS),
